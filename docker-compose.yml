@@ -1,0 +1,115 @@
+services:
+  api:
+    build: .
+    image: tweaker:local
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    environment:
+      TWEAKER_DATABASE_URL: postgresql+psycopg://tweaker:tweaker@postgres:5432/tweaker
+      TWEAKER_RUNNER: arq
+      TWEAKER_REDIS_URL: redis://redis:6379/0
+      TWEAKER_DATA_DIR: /data
+      TWEAKER_STATIC_DIR: /app/static
+      TWEAKER_SENTRY_URL: ${TWEAKER_SENTRY_URL:-http://sentry:9000}
+      TWEAKER_PUBLIC_URL: ${TWEAKER_PUBLIC_URL:-http://localhost:8080}
+      TWEAKER_SECRET_KEY: ${TWEAKER_SECRET_KEY:-}
+      TWEAKER_AUTH_TOKEN: ${TWEAKER_AUTH_TOKEN:-}
+      TWEAKER_DEMO_MODE: ${TWEAKER_DEMO_MODE:-false}
+      SEER_API_SHARED_SECRET: ${SEER_API_SHARED_SECRET:-}
+      SEER_RPC_SHARED_SECRET: ${SEER_RPC_SHARED_SECRET:-}
+      TWEAKER_AI_PROVIDER: ${TWEAKER_AI_PROVIDER:-auto}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      TWEAKER_ANTHROPIC_MODEL: ${TWEAKER_ANTHROPIC_MODEL:-claude-opus-5-5}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      TWEAKER_GITHUB_TOKEN: ${TWEAKER_GITHUB_TOKEN:-}
+      TWEAKER_GITLAB_TOKEN: ${TWEAKER_GITLAB_TOKEN:-}
+      TWEAKER_REPO_MAP: ${TWEAKER_REPO_MAP:-{}}
+    volumes:
+      - tweaker-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - tweaker
+      - sentry
+
+  worker:
+    build: .
+    image: tweaker:local
+    restart: unless-stopped
+    command: ["tweaker-worker"]
+    environment:
+      TWEAKER_DATABASE_URL: postgresql+psycopg://tweaker:tweaker@postgres:5432/tweaker
+      TWEAKER_RUNNER: arq
+      TWEAKER_REDIS_URL: redis://redis:6379/0
+      TWEAKER_DATA_DIR: /data
+      TWEAKER_SENTRY_URL: ${TWEAKER_SENTRY_URL:-http://sentry:9000}
+      TWEAKER_SECRET_KEY: ${TWEAKER_SECRET_KEY:-}
+      SEER_API_SHARED_SECRET: ${SEER_API_SHARED_SECRET:-}
+      SEER_RPC_SHARED_SECRET: ${SEER_RPC_SHARED_SECRET:-}
+      TWEAKER_AI_PROVIDER: ${TWEAKER_AI_PROVIDER:-auto}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      TWEAKER_ANTHROPIC_MODEL: ${TWEAKER_ANTHROPIC_MODEL:-claude-opus-5-5}
+      OPENAI_BASE_URL: ${OPENAI_BASE_URL:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENAI_MODEL: ${OPENAI_MODEL:-}
+      TWEAKER_GITHUB_TOKEN: ${TWEAKER_GITHUB_TOKEN:-}
+      TWEAKER_GITLAB_TOKEN: ${TWEAKER_GITLAB_TOKEN:-}
+      TWEAKER_REPO_MAP: ${TWEAKER_REPO_MAP:-{}}
+    volumes:
+      - tweaker-data:/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - tweaker
+      - sentry
+
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: tweaker
+      POSTGRES_USER: tweaker
+      POSTGRES_PASSWORD: tweaker
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tweaker -d tweaker"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - tweaker
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - tweaker
+
+networks:
+  tweaker:
+  sentry:
+    external: ${SENTRY_NETWORK_EXTERNAL:-false}
+    name: ${SENTRY_NETWORK:-sentry_default}
+
+volumes:
+  tweaker-data:
+  postgres-data:
+  redis-data:
