@@ -34,6 +34,23 @@ def gitlab_api_base(base_url: str) -> str:
     return f"{_origin(base_url)}/api/v4"
 
 
+def _repo_origin(repo_url: str) -> str:
+    parsed = urlparse(repo_url.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError(f"Invalid repository URL: {repo_url}")
+    return f"{parsed.scheme}://{parsed.netloc}"
+
+
+def github_api_base_for_repo(repo_url: str) -> str:
+    origin = _repo_origin(repo_url)
+    host = urlparse(origin).hostname or ""
+    return "https://api.github.com" if host in {"github.com", "www.github.com"} else f"{origin}/api/v3"
+
+
+def gitlab_api_base_for_repo(repo_url: str) -> str:
+    return f"{_repo_origin(repo_url)}/api/v4"
+
+
 def repo_remote_url(
     *,
     provider: str,
@@ -46,6 +63,9 @@ def repo_remote_url(
     if provider_raw and provider_raw.startswith(("http://", "https://")):
         raw = provider_raw.rstrip("/")
         if raw.endswith(".git"):
+            return raw
+        raw_path = urlparse(raw).path.strip("/")
+        if raw_path.endswith(f"{owner}/{name}") or raw_path.endswith(f"{owner}/{name}.git"):
             return raw
         base = _origin(raw)
     else:

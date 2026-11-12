@@ -87,6 +87,8 @@ def update_org(
     if org is None:
         raise HTTPException(status_code=404, detail="Organization not found")
     data = payload.model_dump(exclude_unset=True)
+    if data.get("sentry_url"):
+        data["sentry_url"] = str(data["sentry_url"]).rstrip("/")
     for field in ("sentry_token", "webhook_secret"):
         if field in data:
             value = data.pop(field)

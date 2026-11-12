@@ -126,7 +126,7 @@ class RepoManager:
         if local is not None:
             return self._workspace(repo, local, self.remote_url(repo))
 
-        target = self.settings.seer_repos_dir / _safe_key(repo.full_name)
+        target = self.settings.seer_repos_dir / _safe_key(f"{repo.provider}-{repo.full_name}")
         remote = self.remote_url(repo)
         token = self.token_for(repo)
         if not (target / ".git").exists():
@@ -171,7 +171,7 @@ class RepoManager:
 
     def _workspace(self, repo: RepoDefinition, path: Path, remote: str) -> RepositoryWorkspace:
         proxy = SimpleNamespace(
-            id=_safe_key(repo.full_name),
+            id=_safe_key(f"{repo.provider}:{repo.full_name}"),
             local_path=str(path),
             url=remote,
             default_branch=repo.branch_name or "main",

@@ -1,13 +1,13 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..auth import require_auth
 from ..crypto import encrypt_secret
 from ..db import get_db
-from ..models import Organization, Repository
+from ..models import CodeIndexEntry, Organization, Repository
 from ..schemas import RepositoryCreate, RepositoryOut, RepositoryUpdate
 from ..services.codebase import CodebaseError, RepositoryWorkspace
 from ..services.ingest import audit
@@ -101,6 +101,7 @@ def delete_repo(repo_id: str, db: Session = Depends(get_db)) -> None:
     if org and org.default_repo_id == repo.id:
         org.default_repo_id = None
     audit(db, repo.org_id, "repo.deleted", actor="user", target_type="repo", target_id=repo.id)
+    db.execute(delete(CodeIndexEntry).where(CodeIndexEntry.repo_id == repo.id))
     db.delete(repo)
     db.commit()
 

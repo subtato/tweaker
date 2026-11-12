@@ -18,7 +18,7 @@ from ..config import get_settings
 from ..crypto import decrypt_secret
 from .codebase import RepositoryWorkspace
 from .patch import check_applies, strip_code_fences
-from .scm import github_api_base, gitlab_api_base
+from .scm import github_api_base_for_repo, gitlab_api_base_for_repo
 
 logger = logging.getLogger(__name__)
 
@@ -215,7 +215,7 @@ def _open_pull_request(
 ) -> str | None:
     if repo.provider == "github":
         owner, name = _parse_repo(repo.url)
-        api_base = github_api_base(repo.url)
+        api_base = github_api_base_for_repo(repo.url)
         response = httpx.post(
             f"{api_base}/repos/{owner}/{name}/pulls",
             headers={
@@ -238,7 +238,7 @@ def _open_pull_request(
 
     if repo.provider == "gitlab":
         parsed = urlparse(repo.url)
-        api_base = gitlab_api_base(repo.url)
+        api_base = gitlab_api_base_for_repo(repo.url)
         repo_path = parsed.path.strip("/").removesuffix(".git")
         base_path = urlparse(get_settings().gitlab_base_url).path.strip("/")
         if base_path and repo_path.startswith(base_path + "/"):

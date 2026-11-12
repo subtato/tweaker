@@ -789,3 +789,17 @@ def test_agent_loop_calls_tools_then_answers(monkeypatch):
     assert result.tool_calls[0]["name"] == "search_issues"
     assert any(item["message"]["role"] == "tool_use" for item in result.blocks)
     assert result.usage.input_tokens == 20
+
+
+def test_similar_issues_training_mode_returns_no_grouping(client):
+    payload = {
+        "project_id": 77,
+        "hash": "training-hash",
+        "exception_type": "KeyError",
+        "stacktrace": "app.checkout DISCOUNTS code KeyError",
+        "training_mode": True,
+    }
+    body, headers = _signed(payload)
+    response = client.post("/v0/issues/similar-issues", content=body, headers=headers)
+    assert response.status_code == 200
+    assert response.json()["responses"] == []

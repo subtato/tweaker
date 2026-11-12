@@ -96,6 +96,7 @@ def load_issue_context(
     repo_pins: dict[str, Any] | None = None,
     include_code: bool = True,
     branch_override: str | None = None,
+    branch_overrides: dict[str, str] | None = None,
 ) -> IssueContext:
     details = rpc.get_issue_details(org_id, issue_id or group_id) or {}
     issue = details.get("issue") if isinstance(details.get("issue"), dict) else {}
@@ -129,6 +130,10 @@ def load_issue_context(
     if branch_override:
         for repo in repos:
             repo.branch_name = branch_override
+    for repo in repos:
+        override = (branch_overrides or {}).get(repo.full_name)
+        if override:
+            repo.branch_name = override
 
     ctx = IssueContext(
         org_id=org_id,

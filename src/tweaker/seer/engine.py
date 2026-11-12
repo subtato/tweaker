@@ -233,7 +233,11 @@ def _call_hook(run: SeerRun) -> None:
         run.run_metadata = {**(run.run_metadata or {}), "hook_error": str(exc)[:1000]}
 
 
-def _context_for_run(run: SeerRun, branch_override: str | None = None) -> IssueContext:
+def _context_for_run(
+    run: SeerRun,
+    branch_override: str | None = None,
+    branch_overrides: dict[str, str] | None = None,
+) -> IssueContext:
     if run.group_id is None:
         raise RuntimeError("This run has no Sentry issue")
     payload = run.payload or {}
@@ -248,6 +252,7 @@ def _context_for_run(run: SeerRun, branch_override: str | None = None) -> IssueC
             issue_id=payload.get("group_id") or run.group_id,
             repo_pins=repo_pins if isinstance(repo_pins, dict) else None,
             branch_override=branch_override,
+            branch_overrides=branch_overrides,
         )
 
 
@@ -307,12 +312,21 @@ def _execute_step_run(run: SeerRun, session: Any) -> None:
     payload = run.payload or {}
     step = str(payload.get("step") or "root_cause")
     branch_override = None
+    branch_overrides: dict[str, str] = {}
     if step == "pr_iteration":
         states = run.repo_pr_states or {}
-        first_state = next((item for item in states.values() if isinstance(item, dict)), None)
-        if first_state:
-            branch_override = first_state.get("branch_name")
-    ctx = _context_for_run(run, branch_override=branch_override)
+        for repo_name, state in states.items():
+            if isinstance(state, dict) and state.get("branch_name"):
+                branch_overrides[str(repo_name)] = str(state["branch_name"])
+        if not branch_overrides:
+            first_state = next((item for item in states.values() if isinstance(item, dict)), None)
+            if first_state:
+                branch_override = first_state.get("branch_name")
+    ctx = _context_for_run(
+        run,
+        branch_override=branch_override,
+        branch_overrides=branch_overrides,
+    )
     feedback = _feedback_text(payload) if step == "pr_iteration" else ""
     user_context = str(payload.get("user_context") or "")
     extra_context = "\n\n".join(part for part in (user_context, feedback) if part)

@@ -241,20 +241,21 @@ class AgentRuntime:
         limit = min(max(int(args.get("limit") or 10), 1), 20)
         results = []
         for repo in self._select_repos(args.get("repo")):
+            repo_key = f"{repo.provider}:{repo.full_name}"
             workspace = self.repo_manager.ensure(repo)
             matches = workspace.search(query, max_results=limit)
             if not matches:
                 with session_scope() as session:
-                    stats = index_stats(session, repo.full_name)
+                    stats = index_stats(session, repo_key)
                 if stats["files"] == 0:
                     try:
-                        index_workspace(workspace, repo.full_name)
+                        index_workspace(workspace, repo_key)
                     except Exception as exc:
-                        logger.info("Code index failed for %s: %s", repo.full_name, exc)
+                        logger.info("Code index failed for %s: %s", repo_key, exc)
                 with session_scope() as session:
                     matches = search_index(
                         session,
-                        repo_ids=[repo.full_name],
+                        repo_ids=[repo_key],
                         query=query,
                         limit=limit,
                     )
@@ -308,7 +309,16 @@ class AgentRuntime:
         return {"metadata": metadata, "logs": logs}
 
     def _tool_get_baseline(self, args: dict[str, Any]) -> Any:
-        issue_id = int(args.get("issue_id") or 0)
+        raw_issue = args.get("issue_id")
+        try:
+            issue_id = int(raw_issue or 0)
+        except (TypeError, ValueError):
+            details = self.rpc.get_issue_details(self.run.org_id, str(raw_issue or "")) or {}
+            issue = details.get("issue") if isinstance(details.get("issue"), dict) else {}
+            try:
+                issue_id = int(issue.get("id") or 0)
+            except (TypeError, ValueError):
+                return {"error": "Could not resolve a numeric issue id"}
         tag_keys = [str(item) for item in args.get("tag_keys") or []]
         return self.rpc.get_baseline_tag_distribution(
             self.run.org_id,

@@ -85,7 +85,7 @@ def similar_issues(payload: dict[str, Any]) -> dict[str, Any]:
                 existing.exception_type = exception_type[:300]
             session.commit()
 
-    return {"responses": responses, "model_used": model}
+    return {"responses": [] if training_mode else responses, "model_used": model}
 
 
 def delete_grouping_records(project_id: int) -> int:

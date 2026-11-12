@@ -168,7 +168,7 @@ def scan_issue_route(
     org = db.get(Organization, issue.org_id)
     if org is None:
         raise HTTPException(status_code=404, detail="Organization not found")
-    issue = scan_issue(db, org, issue, use_llm=not payload.force)
+    issue = scan_issue(db, org, issue, use_llm=True)
     audit(db, org.id, "issue.scanned", actor="user", target_type="issue", target_id=issue.id)
     db.commit()
     return _summary(issue, _latest_run(db, issue.id))
