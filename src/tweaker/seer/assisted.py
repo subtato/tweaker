@@ -8,10 +8,12 @@ from typing import Any
 
 from sqlalchemy import select
 
+from ..config import get_settings
 from ..db import session_scope
 from ..metrics import counter, observe
 from ..models import SeerAssistedQuery, SeerRun
 from ..services.llm import ProviderError, get_provider
+from .rpc import SentryRPCClient, SentryRPCError
 
 logger = logging.getLogger(__name__)
 
@@ -103,15 +105,20 @@ def execute_assisted_query(run_id: int) -> None:
         if item is None:
             return
         try:
-            result = translate_query(item.natural_language_query, item.strategy)
-            item.final_response = result
+            translated = translate_query(item.natural_language_query, item.strategy)
+            item.current_step = "execute"
+            session.commit()
+            execution = _execute_translation(item, translated)
+            item.final_response = {**translated, **execution}
             item.status = "completed"
             item.current_step = None
             item.completed_steps = [
                 {"key": "translate"},
+                {"key": "execute"},
                 {"key": "validate"},
             ]
         except Exception as exc:
+            logger.info("Assisted query %s execution failed: %s", run_id, exc)
             item.status = "error"
             item.unsupported_reason = str(exc)[:2000]
             item.current_step = None
@@ -122,6 +129,74 @@ def execute_assisted_query(run_id: int) -> None:
             kind="assisted_query",
         )
         session.commit()
+
+
+def _dataset_for(translated: dict[str, Any], strategy: str) -> str:
+    dataset = str(translated.get("dataset") or "").lower()
+    if dataset:
+        return dataset
+    value = (strategy or "").lower()
+    if value in {"logs", "metrics", "traces", "spans"}:
+        return "spans" if value == "traces" else value
+    return "issues"
+
+
+def _execute_translation(
+    item: SeerAssistedQuery, translated: dict[str, Any]
+) -> dict[str, Any]:
+    """Run the translated query and attach compact results.
+
+    Execution is best-effort: an unavailable Sentry RPC must not make the
+    assisted-query run fail, because the translated query is still useful.
+    """
+    dataset = _dataset_for(translated, item.strategy)
+    query = str(translated.get("query") or "")
+    options = item.options if isinstance(item.options, dict) else {}
+    stats_period = str(options.get("stats_period") or "14d")
+    if get_settings().demo_mode:
+        return {
+            "executed": False,
+            "dataset": dataset,
+            "note": "Query execution is disabled in demo mode.",
+        }
+    try:
+        with SentryRPCClient(viewer_context=item.viewer_context) as rpc:
+            if dataset in {"issues", "search_issues"}:
+                rows = rpc.execute_issues_query(
+                    org_id=item.org_id,
+                    project_ids=item.project_ids,
+                    query=query or "is:unresolved",
+                    limit=int(options.get("limit") or 25),
+                )
+                return {
+                    "executed": True,
+                    "dataset": "issues",
+                    "result_count": len(rows),
+                    "results": rows[:25],
+                }
+            response = rpc.execute_timeseries_query(
+                org_id=item.org_id,
+                dataset=dataset,
+                y_axes=[str(options.get("y_axis") or "count()")],
+                query=query,
+                group_by=list(options.get("group_by") or []),
+                project_ids=item.project_ids,
+                stats_period=stats_period,
+                interval=options.get("interval"),
+            )
+            series_count = len(response) if isinstance(response, list) else len(response or {})
+            return {
+                "executed": True,
+                "dataset": dataset,
+                "series_count": series_count,
+                "results": response,
+            }
+    except (SentryRPCError, OSError, ValueError) as exc:
+        return {
+            "executed": False,
+            "dataset": dataset,
+            "execution_error": str(exc)[:1000],
+        }
 
 
 def assisted_query_state(item: SeerAssistedQuery) -> dict[str, Any]:
@@ -149,24 +224,60 @@ def compare_cohorts(payload: dict[str, Any]) -> dict[str, Any]:
             for key, value in (row or {}).items():
                 if isinstance(value, (int, float)) and not isinstance(value, bool):
                     numeric.setdefault(key, []).append(float(value))
-        return {
-            "count": len(rows),
-            "metrics": {
-                key: {
-                    "mean": round(sum(values) / len(values), 6),
-                    "min": min(values),
-                    "max": max(values),
-                }
-                for key, values in numeric.items()
-            },
+        metrics: dict[str, dict[str, Any]] = {}
+        for key, values in numeric.items():
+            count = len(values)
+            mean = sum(values) / count
+            variance = (
+                sum((value - mean) ** 2 for value in values) / (count - 1)
+                if count > 1
+                else 0.0
+            )
+            metrics[key] = {
+                "mean": round(mean, 6),
+                "min": min(values),
+                "max": max(values),
+                "count": count,
+                "stdev": round(variance**0.5, 6),
+            }
+        return {"count": len(rows), "metrics": metrics}
+
+    base = summarize(baseline)
+    out = summarize(outliers)
+    comparisons: dict[str, dict[str, Any]] = {}
+    significant = False
+    for key in set(base["metrics"]) & set(out["metrics"]):
+        base_metric = base["metrics"][key]
+        out_metric = out["metrics"][key]
+        delta = out_metric["mean"] - base_metric["mean"]
+        base_n = max(base_metric["count"], 1)
+        out_n = max(out_metric["count"], 1)
+        standard_error = (
+            (base_metric["stdev"] ** 2) / base_n
+            + (out_metric["stdev"] ** 2) / out_n
+        ) ** 0.5
+        if standard_error > 0:
+            z_score: float | None = delta / standard_error
+            metric_significant = abs(z_score) >= 1.96
+        else:
+            z_score = None
+            metric_significant = delta != 0
+        relative = delta / base_metric["mean"] if base_metric["mean"] else None
+        comparisons[key] = {
+            "delta": round(delta, 6),
+            "relative_change": round(relative, 6) if relative is not None else None,
+            "z_score": round(z_score, 4) if z_score is not None else None,
+            "significant": metric_significant,
         }
+        significant = significant or metric_significant
 
     return {
-        "baseline": summarize(baseline),
-        "outliers": summarize(outliers),
+        "baseline": base,
+        "outliers": out,
+        "comparison": comparisons,
         "config": config,
         "meta": payload.get("meta") or {},
-        "significant": bool(baseline and outliers),
+        "significant": significant,
     }
 
 
@@ -206,6 +317,11 @@ def match_delegated_agent(payload: dict[str, Any]) -> dict[str, Any] | None:
     org_id = int(payload.get("organization_id") or 0)
     head_branch = str(payload.get("head_branch") or "")
     pr_url = str(payload.get("pr_url") or "")
+    pull_request_id = payload.get("pull_request_id")
+    repo_payload = payload.get("repo") if isinstance(payload.get("repo"), dict) else {}
+    repo_filter = ""
+    if repo_payload.get("owner") and repo_payload.get("name"):
+        repo_filter = f"{repo_payload['owner']}/{repo_payload['name']}"
     with session_scope() as session:
         runs = list(
             session.scalars(
@@ -219,6 +335,8 @@ def match_delegated_agent(payload: dict[str, Any]) -> dict[str, Any] | None:
             for repo, state in (run.repo_pr_states or {}).items():
                 if not isinstance(state, dict):
                     continue
+                if repo_filter and repo != repo_filter:
+                    continue
                 if head_branch and state.get("branch_name") == head_branch:
                     return {
                         "run_id": run.id,
@@ -231,6 +349,16 @@ def match_delegated_agent(payload: dict[str, Any]) -> dict[str, Any] | None:
                         "run_id": run.id,
                         "agent_id": f"seer-{run.id}",
                         "signal_type": "pr_url",
+                        "match_path": repo,
+                    }
+                if pull_request_id is not None and str(pull_request_id) in {
+                    str(state.get("pr_id")),
+                    str(state.get("pr_number")),
+                }:
+                    return {
+                        "run_id": run.id,
+                        "agent_id": f"seer-{run.id}",
+                        "signal_type": "pull_request_id",
                         "match_path": repo,
                     }
     return None

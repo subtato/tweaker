@@ -25,6 +25,7 @@ from ..services.llm.prompts import (
 from ..services.llm.schema import AskAnswer, Diagnosis
 from ..services.patch import check_applies, strip_code_fences, validate_patch
 from ..services.usage import record_usage
+from . import lifecycle
 from .agent_loop import run_agent
 from .context import IssueContext, load_issue_context
 from .diff import unified_diff_to_patches
@@ -281,6 +282,11 @@ def execute_feature_run(run_id: int) -> None:
             run = session.get(SeerRun, run_id)
             if run is not None:
                 _call_hook(run)
+                lifecycle.deliver_feature_result(
+                    run,
+                    status="error" if run.status == "error" else "completed",
+                    error=(run.run_metadata or {}).get("error"),
+                )
                 session.commit()
     except Exception as exc:
         logger.exception("Seer feature run %s failed", run_id)
@@ -302,7 +308,13 @@ def execute_feature_run(run_id: int) -> None:
             with session_scope() as session:
                 run = session.get(SeerRun, run_id)
                 if run is not None:
+                    lifecycle.emit_webhook(
+                        run, lifecycle.ERRORED, {"error": str(exc)[:1000]}
+                    )
                     _call_hook(run)
+                    lifecycle.deliver_feature_result(
+                        run, status="error", error=str(exc)[:4000]
+                    )
                     session.commit()
         except Exception:
             logger.exception("Failure hook failed for Seer run %s", run_id)
@@ -322,6 +334,7 @@ def _execute_step_run(run: SeerRun, session: Any) -> None:
             first_state = next((item for item in states.values() if isinstance(item, dict)), None)
             if first_state:
                 branch_override = first_state.get("branch_name")
+    lifecycle.emit_step_started(run, step)
     ctx = _context_for_run(
         run,
         branch_override=branch_override,
@@ -355,26 +368,30 @@ def _execute_step_run(run: SeerRun, session: Any) -> None:
     }
 
     if step == "root_cause":
+        root_cause = _root_cause_artifact(diagnosis)
         append_block(
             run,
             block(
                 step="root_cause",
                 content=diagnosis.summary,
-                artifacts=[_root_cause_artifact(diagnosis)],
+                artifacts=[root_cause],
                 metadata={"referrer": run.referrer},
             ),
         )
+        lifecycle.emit_step_completed(run, step, {"root_cause": root_cause["data"]})
         run.status = "completed"
     elif step == "solution":
+        solution = _solution_artifact(diagnosis)
         append_block(
             run,
             block(
                 step="solution",
                 content=diagnosis.summary,
-                artifacts=[_solution_artifact(diagnosis)],
+                artifacts=[solution],
                 metadata={"referrer": run.referrer},
             ),
         )
+        lifecycle.emit_step_completed(run, step, {"solution": solution["data"]})
         run.status = "completed"
     elif step in {"code_changes", "pr_iteration"}:
         patch_error = _validate(diagnosis, ctx, ctx.repos)
@@ -387,6 +404,7 @@ def _execute_step_run(run: SeerRun, session: Any) -> None:
                     content=f"The proposed patch could not be applied: {patch_error}",
                 ),
             )
+            lifecycle.emit_webhook(run, lifecycle.ERRORED, {"error": patch_error})
             run.status = "error"
             run.failure_reason = "patch_validation_failed"
             return
@@ -410,6 +428,20 @@ def _execute_step_run(run: SeerRun, session: Any) -> None:
                 metadata={"referrer": run.referrer},
             ),
         )
+        if step == "pr_iteration":
+            lifecycle.emit_step_completed(
+                run,
+                step,
+                {
+                    "pull_requests": lifecycle.pr_entries_from_states(
+                        run.repo_pr_states or {}
+                    ),
+                    "code_changes": patches,
+                    "iteration_index": max(0, _iteration_index(run) - 1),
+                },
+            )
+        else:
+            lifecycle.emit_step_completed(run, step, {"code_changes": patches})
         run.status = "completed"
     else:
         append_block(
@@ -427,6 +459,7 @@ def _execute_single_run(run: SeerRun, session: Any) -> None:
         or ("open_pr" if payload.get("pr_internal_settings") else "code_changes")
     )
     ctx = _context_for_run(run)
+    lifecycle.emit_step_started(run, "root_cause")
     diagnosis, usage = _diagnose(
         ctx,
         mode="autofix",
@@ -449,46 +482,51 @@ def _execute_single_run(run: SeerRun, session: Any) -> None:
         "root_cause": diagnosis.root_cause,
         "confidence": diagnosis.confidence,
     }
+    root_cause = artifact(
+        "single_run_root_cause",
+        {
+            "headline": diagnosis.summary,
+            "cause": diagnosis.root_cause,
+            "five_whys": diagnosis.five_whys or [diagnosis.root_cause],
+            "reproduction_steps": diagnosis.reproduction_steps or diagnosis.tests,
+        },
+        "Single-run root cause generated from Sentry telemetry and repository context.",
+    )
     append_block(
         run,
         block(
             step="root_cause",
             content=diagnosis.summary,
-            artifacts=[
-                artifact(
-                    "single_run_root_cause",
-                    {
-                        "headline": diagnosis.summary,
-                        "cause": diagnosis.root_cause,
-                        "five_whys": diagnosis.five_whys or [diagnosis.root_cause],
-                        "reproduction_steps": diagnosis.reproduction_steps or diagnosis.tests,
-                    },
-                    "Single-run root cause generated from Sentry telemetry and repository context.",
-                )
-            ],
+            artifacts=[root_cause],
             metadata={"referrer": run.referrer},
         ),
     )
+    lifecycle.emit_step_completed(run, "root_cause", {"root_cause": root_cause["data"]})
     if stopping_point == "root_cause":
         run.status = "completed"
         return
+    lifecycle.emit_step_started(run, "solution")
+    solution = _solution_artifact(diagnosis)
     append_block(
         run,
         block(
             step="solution",
             content=diagnosis.summary,
-            artifacts=[_solution_artifact(diagnosis)],
+            artifacts=[solution],
             metadata={"referrer": run.referrer},
         ),
     )
+    lifecycle.emit_step_completed(run, "solution", {"solution": solution["data"]})
     if stopping_point == "solution":
         run.status = "completed"
         return
 
+    lifecycle.emit_step_started(run, "code_changes")
     patch_error = _validate(diagnosis, ctx, ctx.repos)
     if patch_error:
         run.run_metadata = {**(run.run_metadata or {}), "patch_error": patch_error}
         append_block(run, block(step="code_changes", content=f"Patch validation failed: {patch_error}"))
+        lifecycle.emit_webhook(run, lifecycle.ERRORED, {"error": patch_error})
         run.status = "error"
         run.failure_reason = "patch_validation_failed"
         return
@@ -503,6 +541,7 @@ def _execute_single_run(run: SeerRun, session: Any) -> None:
                 metadata={"referrer": run.referrer},
             ),
         )
+    lifecycle.emit_step_completed(run, "code_changes", {"code_changes": patches})
     pairs = _patch_pairs(diagnosis, ctx.repos)
     if stopping_point != "open_pr" or not pairs:
         run.status = "completed"
@@ -514,7 +553,9 @@ def _execute_single_run(run: SeerRun, session: Any) -> None:
         else {}
     )
     states = dict(run.repo_pr_states or {})
+    draft = not bool(pr_settings.get("ready_for_review", True))
     failures = 0
+    created: list[dict[str, Any]] = []
     for repo, patch in pairs:
         token = RepoManager().token_for(repo)
         try:
@@ -525,15 +566,19 @@ def _execute_single_run(run: SeerRun, session: Any) -> None:
                 patch=patch,
                 token=token,
                 body=pr_settings.get("description_suffix"),
-                draft=not bool(pr_settings.get("ready_for_review", True)),
+                draft=draft,
             )
             states[repo.full_name] = _pr_state(repo, result, "completed", None)
+            created.append(lifecycle.pull_request_entry(repo, states[repo.full_name]))
             _record_pr_commit_sha(run, repo.full_name, result.get("commit_sha"))
         except Exception as exc:
             logger.warning("Seer single-run PR failed for %s: %s", repo.full_name, exc)
             states[repo.full_name] = _pr_state(repo, {}, "error", str(exc))
             failures += 1
     run.repo_pr_states = states
+    if created:
+        lifecycle.notify_pr_created(run, created)
+        lifecycle.emit_pr_created(run, created, draft=draft)
     if failures == len(pairs):
         run.status = "error"
         run.failure_reason = "pr_creation_failed"
@@ -551,6 +596,7 @@ def _pr_state(
     return {
         "repo_name": repo.full_name,
         "provider": "gitlab" if repo.is_gitlab else "github",
+        "repo_external_id": repo.external_id,
         "branch_name": result.get("branch_name"),
         "pr_number": _pr_number(pr_url),
         "pr_url": pr_url,
@@ -562,6 +608,15 @@ def _pr_state(
         "description": None,
         "integration_id": repo.integration_id,
     }
+
+
+def _iteration_index(run: SeerRun) -> int:
+    return sum(
+        1
+        for item in (run.blocks or [])
+        if ((item.get("message") or {}).get("metadata") or {}).get("step")
+        == "pr_iteration"
+    )
 
 
 def _record_pr_commit_sha(run: SeerRun, repo_name: str, sha: str | None) -> None:
@@ -595,19 +650,36 @@ def _execute_agent_chat(run_id: int) -> None:
         run = session.get(SeerRun, run_id)
         if run is None:
             return
-        payload = run.payload or {}
+        payload = dict(run.payload or {})
+        metadata = dict(run.run_metadata or {})
+        pending = metadata.pop("pending_user_input", None)
+        if isinstance(pending, dict):
+            payload["pending_user_input"] = pending
+            run.run_metadata = metadata
         question = str(payload.get("query") or "")
         append_block(run, block(step="chat", content=question, role="user"))
         session.commit()
         session.expunge(run)
     try:
-        result = run_agent(run, question, run.payload or {})
+        result = run_agent(run, question, payload)
         with session_scope() as session:
             current = session.get(SeerRun, run_id)
             if current is None:
                 return
             for item in result.blocks:
                 append_block(current, item)
+            _record_usage(current, result.usage)
+            if result.status == "awaiting_user_input":
+                current.run_metadata = {
+                    **(current.run_metadata or {}),
+                    "agent_tool_calls": result.tool_calls,
+                    "agent_metadata": result.metadata,
+                    "pending_user_input": result.pending_user_input,
+                }
+                set_status(current, "awaiting_user_input")
+                _run_metrics(current.kind, "awaiting_user_input", started)
+                session.commit()
+                return
             append_block(
                 current,
                 block(
@@ -616,12 +688,11 @@ def _execute_agent_chat(run_id: int) -> None:
                     metadata={"referrer": current.referrer},
                 ),
             )
-            session.commit()
-            _record_usage(current, result.usage)
             current.run_metadata = {
                 **(current.run_metadata or {}),
                 "agent_tool_calls": result.tool_calls,
                 "agent_metadata": result.metadata,
+                "pending_user_input": None,
             }
             set_status(current, "completed")
             _run_metrics(current.kind, "completed", started)
@@ -1217,7 +1288,14 @@ def _group_id_from_payload(payload: dict[str, Any]) -> int | None:
     return None
 
 
-def summarize_issue(*, org_id: int, group_id: int, project_id: int | None, viewer: str | None) -> dict[str, Any]:
+def summarize_issue(
+    *,
+    org_id: int,
+    group_id: int,
+    project_id: int | None,
+    viewer: str | None,
+    trace_tree: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     with SentryRPCClient(viewer_context=viewer) as rpc:
         ctx = load_issue_context(
             rpc,
@@ -1226,7 +1304,8 @@ def summarize_issue(*, org_id: int, group_id: int, project_id: int | None, viewe
             project_id=project_id,
             include_code=False,
         )
-    diagnosis, _ = _diagnose(ctx, max_tokens=4_000)
+    extra = json.dumps(trace_tree, default=str)[:20_000] if trace_tree else ""
+    diagnosis, _ = _diagnose(ctx, max_tokens=4_000, extra_context=extra)
     fixability = heuristic_fixability(ctx.issue_proxy(), ctx.compact_event, ctx.code_text)
     return {
         "group_id": str(group_id),
@@ -1318,6 +1397,7 @@ def create_pr_for_run(run_id: int, payload: dict[str, Any]) -> None:
         }
         session.commit()
         issue = _issue_proxy_from_metadata(metadata)
+        draft = not bool(payload.get("ready_for_review", True))
         try:
             result = create_pull_request(
                 run=run,
@@ -1329,15 +1409,20 @@ def create_pr_for_run(run_id: int, payload: dict[str, Any]) -> None:
                 base_branch=existing_branch or repo.branch_name,
                 title=payload.get("title"),
                 body=payload.get("pr_description_suffix"),
-                draft=not bool(payload.get("ready_for_review", True)),
+                draft=draft,
                 existing_pr_url=existing_pr_url,
                 open_pr=bool(payload.get("open_pr", True)),
             )
+            state = _pr_state(repo, result, "completed", None)
             run.repo_pr_states = {
                 **(run.repo_pr_states or {}),
-                repo.full_name: _pr_state(repo, result, "completed", None),
+                repo.full_name: state,
             }
             _record_pr_commit_sha(run, repo.full_name, result.get("commit_sha"))
+            if state.get("pr_url") and not existing_pr_url:
+                entries = [lifecycle.pull_request_entry(repo, state)]
+                lifecycle.notify_pr_created(run, entries)
+                lifecycle.emit_pr_created(run, entries, draft=draft)
         except Exception as exc:
             logger.warning("PR creation failed for Seer run %s: %s", run.id, exc)
             run.repo_pr_states = {

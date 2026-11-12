@@ -89,6 +89,7 @@ Response:
     "status": "completed",
     "failure_reason": null,
     "updated_at": "2026-11-11T20:00:00Z",
+    "pending_user_input": null,
     "repo_pr_states": {},
     "coding_agents": {},
     "queued_feedback": []
@@ -98,12 +99,37 @@ Response:
 }
 ```
 
+`status` is one of `processing`, `completed`, `error`, or
+`awaiting_user_input`. When the agent calls `ask_user_question`, the run pauses
+with:
+
+```json
+{
+  "id": "<uuid>",
+  "input_type": "ask_user_question",
+  "data": {"question": "...", "options": ["..."], "context": null}
+}
+```
+
+Resume by posting a new `explorer/chat` with the same `run_id` and the user's
+reply as `query`, or by sending an `explorer/update` payload with
+`type: "user_input_response"` and `response_data`.
+
 ### `POST /v1/automation/explorer/update`
 
 `{"run_id": 123, "organization_id": 1, "payload": {"type": "create_pr", ...}}`
 
 Returns `202`. Tweaker pushes a branch and opens a GitHub PR or GitLab MR, then
 writes `repo_pr_states` for the repo.
+
+Other update types:
+
+| `type` | Behavior |
+| --- | --- |
+| `select_solution` | Stores the chosen solution and, for step-by-step Autofix, starts the `code_changes` step |
+| `user_input_response` | Records the reply and resumes an awaiting Explorer run |
+| `create_branch` | Pushes a branch without opening a PR |
+| `interrupt` | Marks the run complete, appends an interruption block, emits `seer.stopped` |
 
 ### `POST /v1/automation/explorer/repos`
 
@@ -204,16 +230,18 @@ Sentry's Explorer UI already renders.
 | `POST /v1/assisted-query/translate-agentic` | Natural language → Sentry search query |
 | `POST /v1/assisted-query/start` | Creates an async assisted-query run and returns `run_id` |
 | `POST /v1/assisted-query/state` | Returns `{"session": {run_id, status, current_step, completed_steps, final_response, unsupported_reason}}` |
-| `POST /v1/workflows/compare/cohort` | Cohort counts and numeric summaries |
-| `POST /v1/explorer/service-map/update` | Accepted; returns 202 |
+| `POST /v1/workflows/compare/cohort` | Cohort counts, mean/stdev, delta, relative change, z-score, and significance |
+| `POST /v1/explorer/service-map/update` | Persists nodes/edges per organization; returns 202 |
 | `POST /v1/automation/coding-agent/state/update` | Updates a coding-agent entry on a run |
 | `POST /v1/automation/coding-agent/state/set` | Replaces coding-agent entries on a run |
 | `POST /v1/pr-metrics/delegated-agent-match` | Matches a branch/PR URL to a run; 202 when unmatched |
-| `POST /v1/anomaly-detection/detect` | Robust median/MAD anomaly flags |
-| `POST /v1/anomaly-detection/store` | Accepted; returns `{"success": true}` |
-| `POST /v1/anomaly-detection/delete-alert-data` | Accepted; returns `{"success": true}` |
-| `POST /v1/anomaly-detection/alert-data` | Empty threshold-data envelope |
-| `POST /v1/code_review`, `/check/rerun`, `/review-request` | Creates a check run/commit status, posts inline review comments and annotations, and completes the check |
+| `POST /v1/anomaly-detection/detect` | Robust median/MAD anomaly flags; honors `config.sensitivity` and `config.direction` |
+| `POST /v1/anomaly-detection/store` | Persists `{organization_id, project_id, alert, config, timeseries}` per detector |
+| `POST /v1/anomaly-detection/delete-alert-data` | Deletes the detector's stored history |
+| `POST /v1/anomaly-detection/alert-data` | Returns `{success, message, data: [{external_alert_id, timestamp, value, yhat_lower, yhat_upper}]}` for `{alert, start, end}` |
+| `POST /v1/automation/explorer/index`, `/index/org-repo-knowledge` | Indexes the repositories connected to the org/project |
+| `POST /v1/automation/explorer/export-indexes` | Exports indexed files per repo under `tables` |
+| `POST /v1/code_review`, `/check/rerun`, `/review-request` | Creates a check run/commit status, posts inline review comments and annotations, and completes the check; `check/rerun` resolves `original_run_id` |
 | `POST /v1/code_review/pr-closed` | Cancels the matching check run |
 | `POST /v1/offboarding/repository` | Accepted |
 
@@ -320,6 +348,39 @@ reconciliation and push de-duplication.
 | `get_organization_slug` | Org slug |
 | `get_commit_author` | Viewer GitHub identity for PR attribution |
 | `call_on_completion_hook` | Advance the Autofix pipeline |
+| `deliver_feature_result` | Complete a single-run feature in Sentry |
+| `notify_seer_pr_created` | Attribute and link a PR Seer opened |
+| `send_seer_webhook` | Emit `seer.*` lifecycle activities |
+| `get_organization_features` | Organization feature flags |
+| `get_issues_stats` | Counts, users, first/last seen, timeseries |
+| `get_event_filter_keys` / `get_event_filter_key_values` | Discover searchable event fields and values |
+| `get_profile_details` / `get_attributes_for_span` | Profile execution trees and span attributes |
+| `get_transactions_for_project` / `get_trace_for_transaction` / `get_profiles_for_trace` / `get_issues_for_transaction` | Agent investigation tools |
+| `execute_table_query` / `execute_timeseries_query` / `execute_trace_table_query` | Events and trace queries |
+| `get_issues_by_raw_query` / `get_issues_by_function_name` / `get_issues_related_to_exception_type` | Repository-scoped issue discovery |
+| `find_referenced_fix_statements` | Resolve issue references in text |
+| `has_repo_code_mappings` / `get_repo_installation_id` | Repository integration metadata |
+
+## Lifecycle webhooks
+
+Tweaker calls `send_seer_webhook` at pipeline milestones. These are best-effort:
+transport or permission failures are logged and do not fail the run.
+
+| Event | Extra payload |
+| --- | --- |
+| `root_cause_started` / `root_cause_completed` | `root_cause` on completion |
+| `solution_started` / `solution_completed` | `solution` on completion |
+| `coding_started` / `coding_completed` | `code_changes` on completion |
+| `pr_created` / `pr_ready_for_review` | `pull_requests` |
+| `iteration_started` / `iteration_completed` | `pull_requests`, `code_changes`, `iteration_index` |
+| `errored` | `error` |
+| `stopped` | `stop` |
+
+All events carry `run_id`, and `group_id`/`project_id` when known. Sentry uses
+them to write issue-stream activities, notify Sentry Apps, and drive autofix
+continuation. `notify_seer_pr_created` is called separately for every newly
+opened PR with `{repo_name, provider, repo_external_id, pull_request: {pr_number,
+pr_url}}`.
 
 ## Sentry feature flags
 
@@ -333,21 +394,20 @@ you may need to patch or feature-flag for your deployment.
 
 ## Not implemented
 
-- Billing, credits, quotas, and the Seer Wallet.
-- Full production-grade anomaly detection, embedding-based grouping, and
-  persisted service maps. Tweaker provides local heuristics and accepted
-  envelopes, not Seer's trained models.
+- Billing, credits, and the Seer Wallet. Local quotas are implemented.
+- Full production-grade anomaly detection and embedding-based grouping. Tweaker
+  persists detector history and service maps, but detection and grouping are
+  local heuristics, not Seer's trained models.
 - Datadog/GCP/Grafana monitoring-provider connectors. Provider metadata is
   passed into agent context, but Tweaker does not call those services.
 - Automatic PR iteration driven by CI/review comments. The `pr_iteration` step
   accepts feedback and updates the existing branch/PR, but Sentry's full
   check-suite/review reaction loop is not replicated.
-- Every Seer code-review heuristic. The check-run/review-comment loop is
-  implemented; the model review quality is our own.
+- Every Seer code-review heuristic. The check-run/review-comment loop and
+  `original_run_id` reruns are implemented; the model review quality is our own.
 - Coding-agent handoff (Cursor/Claude/Copilot) beyond returning an accepted
   response.
-- The full Seer Agent tool surface: dashboards, monitors, issue mutation,
-  code-mode execution, interactive approvals, and some trace/log/profile tools.
-  Custom tools are supported through `call_custom_tool` when the model selects
-  one.
-- Sentry's `send_seer_webhook` and some admin-only RPC methods.
+- Agent dashboards, monitors, issue mutation, and code-mode execution. The
+  interactive `ask_user_question` approval flow is implemented, as are most
+  trace/log/profile/query tools and `call_custom_tool`.
+- Some admin-only RPC methods and monitoring-provider token RPCs.

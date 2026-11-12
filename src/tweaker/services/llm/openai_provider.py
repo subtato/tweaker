@@ -117,10 +117,11 @@ class OpenAICompatibleProvider(LLMProvider):
         system: str,
         prompt: str,
         max_tokens: int = 4000,
+        model: str | None = None,
     ) -> tuple[str, Usage]:
         data = self._request(
             {
-                "model": self.model,
+                "model": model or self.model,
                 "messages": [
                     {"role": "system", "content": system},
                     {"role": "user", "content": prompt},

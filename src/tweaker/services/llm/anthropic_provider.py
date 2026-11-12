@@ -57,11 +57,11 @@ class AnthropicProvider(LLMProvider):
             self._client = anthropic.Anthropic(api_key=self.api_key, max_retries=2)
         return self._client
 
-    def _usage(self, response: Any) -> Usage:
+    def _usage(self, response: Any, model: str | None = None) -> Usage:
         raw = getattr(response, "usage", None)
         input_tokens = int(getattr(raw, "input_tokens", 0) or 0)
         output_tokens = int(getattr(raw, "output_tokens", 0) or 0)
-        rates = _PRICING.get(self.model, (0.0, 0.0))
+        rates = _PRICING.get(model or self.model, (0.0, 0.0))
         cost = (input_tokens * rates[0] + output_tokens * rates[1]) / 1_000_000
         return Usage(input_tokens=input_tokens, output_tokens=output_tokens, cost_usd=round(cost, 6))
 
@@ -143,11 +143,13 @@ class AnthropicProvider(LLMProvider):
         system: str,
         prompt: str,
         max_tokens: int = 4000,
+        model: str | None = None,
     ) -> tuple[str, Usage]:
         client = self._get_client()
+        selected_model = model or self.model
         try:
             response = client.messages.create(
-                model=self.model,
+                model=selected_model,
                 max_tokens=max_tokens,
                 system=system,
                 messages=[{"role": "user", "content": prompt}],
@@ -160,7 +162,7 @@ class AnthropicProvider(LLMProvider):
         text = "".join(
             getattr(block, "text", "") for block in response.content if getattr(block, "type", "") == "text"
         )
-        return text, self._usage(response)
+        return text, self._usage(response, selected_model)
 
     def complete_with_tools(
         self,

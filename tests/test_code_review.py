@@ -176,6 +176,44 @@ def test_code_review_rerun_creates_new_check_run(client, monkeypatch):
     session.close()
 
 
+def test_code_review_rerun_reuses_original_review(client):
+    original = create_code_review(
+        {
+            "data": {
+                "repo": {
+                    "provider": "github",
+                    "owner": "acme",
+                    "name": "store",
+                    "external_id": "42",
+                    "base_commit_sha": "base-sha",
+                },
+                "pr_id": 7,
+            }
+        },
+        org_id=4242,
+    )
+    rerun = create_code_review({"original_run_id": str(original.id)}, org_id=4242)
+    assert rerun.id != original.id
+    assert rerun.provider == "github"
+    assert rerun.owner == "acme"
+    assert rerun.name == "store"
+    assert rerun.pr_id == "7"
+    assert rerun.status == "processing"
+
+    # The external_id on the check run is the review id, so a rerun can also
+    # arrive addressed by check_run_id.
+    from tweaker.db import get_session_factory
+    from tweaker.models import SeerCodeReview
+
+    session = get_session_factory()()
+    stored = session.get(SeerCodeReview, original.id)
+    stored.check_run_id = "987"
+    session.commit()
+    session.close()
+    by_check_run = create_code_review({"original_run_id": "987"}, org_id=4242)
+    assert by_check_run.pr_id == "7"
+
+
 @respx.mock
 def test_code_review_gitlab_status_and_discussions(client, monkeypatch):
     settings = SimpleNamespace(

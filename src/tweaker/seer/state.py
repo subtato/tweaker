@@ -68,7 +68,7 @@ def wire_state(run: SeerRun) -> dict[str, Any]:
         "failure_reason": run.failure_reason,
         "updated_at": updated.isoformat().replace("+00:00", "Z"),
         "owner_user_id": (run.run_metadata or {}).get("owner_user_id"),
-        "pending_user_input": None,
+        "pending_user_input": (run.run_metadata or {}).get("pending_user_input"),
         "repo_pr_states": run.repo_pr_states or {},
         "coding_agents": run.coding_agents or {},
         "queued_feedback": run.queued_feedback or [],

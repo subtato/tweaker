@@ -289,6 +289,30 @@ class SeerServiceMap(Base, TimestampMixin):
     edges: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
 
 
+class SeerAnomalyData(Base, TimestampMixin):
+    """Training history and threshold data for one dynamic-alert detector.
+
+    Sentry identifies a detector by ``alert.source_id`` (the query subscription
+    id) or, during the dual-processing rollout, ``alert.id``. ``alert_key``
+    normalizes both so a later delete/read can find the row.
+    """
+
+    __tablename__ = "seer_anomaly_data"
+    __table_args__ = (
+        UniqueConstraint("org_id", "alert_key", name="uq_anomaly_org_alert"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    org_id: Mapped[int] = mapped_column(Integer, index=True)
+    project_id: Mapped[int | None] = mapped_column(Integer, index=True)
+    alert_key: Mapped[str] = mapped_column(String(120), index=True)
+    source_id: Mapped[int | None] = mapped_column(Integer)
+    external_alert_id: Mapped[int | None] = mapped_column(Integer)
+    config: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    timeseries: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
+    cur_window: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+
+
 class SeerGroupingRecord(Base, TimestampMixin):
     __tablename__ = "seer_grouping_records"
 

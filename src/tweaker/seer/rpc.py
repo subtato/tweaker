@@ -34,9 +34,11 @@ class SentryRPCClient:
         shared_secret: str | None = None,
         viewer_context: str | None = None,
         timeout: float | None = None,
+        retries: int = 3,
     ) -> None:
         settings = get_settings()
         self.base_url = (base_url or settings.sentry_url).rstrip("/")
+        self.retries = max(1, int(retries))
         secret = shared_secret or settings.seer_rpc_shared_secret
         if secret and secret.lstrip().startswith("["):
             try:
@@ -78,15 +80,15 @@ class SentryRPCClient:
             headers["X-Viewer-Context"] = self.viewer_context
         url = f"{self.base_url}/api/0/seer-rpc/{method}/"
         response: httpx.Response | None = None
-        for attempt in range(3):
+        for attempt in range(self.retries):
             try:
                 response = self._client.post(url, content=body, headers=headers)
             except httpx.RequestError as exc:
-                if attempt < 2:
+                if attempt < self.retries - 1:
                     time.sleep(0.3 * (attempt + 1))
                     continue
                 raise SentryRPCError(f"Could not reach Sentry RPC: {exc}") from exc
-            if response.status_code in {429, 500, 502, 503, 504} and attempt < 2:
+            if response.status_code in {429, 500, 502, 503, 504} and attempt < self.retries - 1:
                 retry_after = response.headers.get("Retry-After", "0.5")
                 try:
                     delay = min(float(retry_after), 5.0)
@@ -322,11 +324,20 @@ class SentryRPCClient:
         return data if isinstance(data, dict) else {}
 
     def get_project_members(
-        self, org_id: int, project_id: int, limit: int = 3
+        self,
+        org_id: int,
+        project_id: int,
+        limit: int = 3,
+        exclude_group_id: int | None = None,
     ) -> dict[str, Any]:
         data = self.call(
             "get_project_members",
-            {"organization_id": org_id, "project_id": project_id, "limit": limit},
+            {
+                "organization_id": org_id,
+                "project_id": project_id,
+                "limit": limit,
+                "exclude_group_id": exclude_group_id,
+            },
         )
         return data if isinstance(data, dict) else {}
 
@@ -465,6 +476,7 @@ class SentryRPCClient:
         status: str,
         result: dict[str, Any] | None = None,
         error: str | None = None,
+        prompt_version: str | None = None,
     ) -> None:
         self.call(
             "deliver_feature_result",
@@ -475,5 +487,350 @@ class SentryRPCClient:
                 "status": status,
                 "result": result,
                 "error": error,
+                "prompt_version": prompt_version,
             },
         )
+
+    def notify_seer_pr_created(
+        self,
+        *,
+        organization_id: int,
+        run_id: int,
+        pull_requests: list[dict[str, Any]],
+        group_id: int | None = None,
+    ) -> Any:
+        """Tell Sentry about PRs Seer opened so it can attribute and link them.
+
+        This is deliberately separate from the autofix completion hook. Sentry
+        records PR metrics and links the PR back to the Seer run; failures are
+        best-effort and must not fail the run.
+        """
+        return self.call(
+            "notify_seer_pr_created",
+            {
+                "organization_id": organization_id,
+                "run_id": run_id,
+                "pull_requests": pull_requests,
+                "group_id": group_id,
+            },
+        )
+
+    def send_seer_webhook(
+        self,
+        *,
+        event_name: str,
+        organization_id: int,
+        payload: dict[str, Any],
+    ) -> Any:
+        """Emit a Seer lifecycle webhook (``seer.root_cause_started``, ...).
+
+        Sentry uses these to record issue-stream activities, notify Sentry Apps,
+        and drive autofix continuation. They are best-effort signals.
+        """
+        return self.call(
+            "send_seer_webhook",
+            {
+                "event_name": event_name,
+                "organization_id": organization_id,
+                "payload": payload,
+            },
+        )
+
+    def get_organization_features(
+        self, org_id: int, user_id: int | None = None
+    ) -> dict[str, Any]:
+        data = self.call(
+            "get_organization_features",
+            {"org_id": org_id, "user_id": user_id},
+        )
+        return data if isinstance(data, dict) else {}
+
+    def get_issues_stats(
+        self,
+        *,
+        org_id: int,
+        issue_ids: list[str],
+        project_ids: list[int] | None = None,
+        query: str = "is:unresolved",
+        stats_period: str | None = "14d",
+        start: str | None = None,
+        end: str | None = None,
+    ) -> Any:
+        if start and end:
+            stats_period = None
+        return self.call(
+            "get_issues_stats",
+            {
+                "org_id": org_id,
+                "issue_ids": issue_ids,
+                "project_ids": project_ids or [],
+                "query": query,
+                "stats_period": stats_period,
+                "start": start,
+                "end": end,
+            },
+        )
+
+    def get_event_filter_keys(
+        self,
+        *,
+        org_id: int,
+        project_ids: list[int] | None = None,
+        stats_period: str | None = "14d",
+        start: str | None = None,
+        end: str | None = None,
+        include_feature_flags: bool = False,
+    ) -> dict[str, Any]:
+        if start and end:
+            stats_period = None
+        data = self.call(
+            "get_event_filter_keys",
+            {
+                "org_id": org_id,
+                "project_ids": project_ids or [],
+                "stats_period": stats_period,
+                "start": start,
+                "end": end,
+                "include_feature_flags": include_feature_flags,
+            },
+        )
+        return data if isinstance(data, dict) else {}
+
+    def get_event_filter_key_values(
+        self,
+        *,
+        org_id: int,
+        filter_key: str,
+        substring: str | None = None,
+        project_ids: list[int] | None = None,
+        stats_period: str | None = "14d",
+        start: str | None = None,
+        end: str | None = None,
+    ) -> list[dict[str, Any]]:
+        if start and end:
+            stats_period = None
+        data = self.call(
+            "get_event_filter_key_values",
+            {
+                "org_id": org_id,
+                "filter_key": filter_key,
+                "substring": substring,
+                "project_ids": project_ids or [],
+                "stats_period": stats_period,
+                "start": start,
+                "end": end,
+            },
+        )
+        if isinstance(data, list):
+            return [item for item in data if isinstance(item, dict)]
+        return []
+
+    def get_profile_details(
+        self,
+        *,
+        organization_id: int,
+        project_id: int,
+        profile_id: str,
+        is_continuous: bool = False,
+        precise_start_ts: float | None = None,
+        precise_finish_ts: float | None = None,
+    ) -> dict[str, Any]:
+        data = self.call(
+            "get_profile_details",
+            {
+                "organization_id": organization_id,
+                "project_id": project_id,
+                "profile_id": profile_id,
+                "is_continuous": is_continuous,
+                "precise_start_ts": precise_start_ts,
+                "precise_finish_ts": precise_finish_ts,
+            },
+        )
+        return data if isinstance(data, dict) else {}
+
+    def get_attributes_for_span(
+        self, *, org_id: int, project_id: int, trace_id: str, span_id: str
+    ) -> dict[str, Any]:
+        data = self.call(
+            "get_attributes_for_span",
+            {
+                "org_id": org_id,
+                "project_id": project_id,
+                "trace_id": trace_id,
+                "span_id": span_id,
+            },
+        )
+        return data if isinstance(data, dict) else {}
+
+    def get_transactions_for_project(self, project_id: int) -> dict[str, Any]:
+        data = self.call("get_transactions_for_project", {"project_id": project_id})
+        return data if isinstance(data, dict) else {}
+
+    def get_trace_for_transaction(
+        self, transaction_name: str, project_id: int
+    ) -> dict[str, Any]:
+        data = self.call(
+            "get_trace_for_transaction",
+            {"transaction_name": transaction_name, "project_id": project_id},
+        )
+        return data if isinstance(data, dict) else {}
+
+    def get_profiles_for_trace(self, trace_id: str, project_id: int) -> dict[str, Any]:
+        data = self.call(
+            "get_profiles_for_trace",
+            {"trace_id": trace_id, "project_id": project_id},
+        )
+        return data if isinstance(data, dict) else {}
+
+    def get_issues_for_transaction(
+        self, transaction_name: str, project_id: int
+    ) -> dict[str, Any]:
+        data = self.call(
+            "get_issues_for_transaction",
+            {"transaction_name": transaction_name, "project_id": project_id},
+        )
+        return data if isinstance(data, dict) else {}
+
+    def execute_table_query(self, **params: Any) -> Any:
+        return self.call("execute_table_query", params)
+
+    def execute_timeseries_query(self, **params: Any) -> Any:
+        return self.call("execute_timeseries_query", params)
+
+    def execute_trace_table_query(self, **params: Any) -> Any:
+        return self.call("execute_trace_table_query", params)
+
+    def get_issues_by_raw_query(
+        self,
+        *,
+        organization_id: int,
+        provider: str,
+        external_id: str,
+        query: str,
+        owner: str,
+        name: str,
+        sort_by: str = "date",
+        limit: int = 20,
+        max_num_days_ago: int = 30,
+        run_id: int | None = None,
+    ) -> Any:
+        return self.call(
+            "get_issues_by_raw_query",
+            {
+                "organization_id": organization_id,
+                "provider": provider,
+                "external_id": external_id,
+                "query": query,
+                "owner": owner,
+                "name": name,
+                "sort_by": sort_by,
+                "limit": limit,
+                "max_num_days_ago": max_num_days_ago,
+                "run_id": run_id,
+            },
+        )
+
+    def get_issues_by_function_name(
+        self,
+        *,
+        organization_id: int,
+        provider: str,
+        external_id: str,
+        filename: str,
+        function_name: str,
+        owner: str,
+        name: str,
+        max_num_issues_per_file: int = 10,
+        run_id: int | None = None,
+    ) -> Any:
+        return self.call(
+            "get_issues_by_function_name",
+            {
+                "organization_id": organization_id,
+                "provider": provider,
+                "external_id": external_id,
+                "filename": filename,
+                "function_name": function_name,
+                "owner": owner,
+                "name": name,
+                "max_num_issues_per_file": max_num_issues_per_file,
+                "run_id": run_id,
+            },
+        )
+
+    def get_issues_related_to_exception_type(
+        self,
+        *,
+        organization_id: int,
+        provider: str,
+        external_id: str,
+        exception_type: str,
+        owner: str,
+        name: str,
+        max_num_issues: int = 20,
+        num_days_ago: int = 30,
+        run_id: int | None = None,
+    ) -> Any:
+        return self.call(
+            "get_issues_related_to_exception_type",
+            {
+                "organization_id": organization_id,
+                "provider": provider,
+                "external_id": external_id,
+                "exception_type": exception_type,
+                "owner": owner,
+                "name": name,
+                "max_num_issues": max_num_issues,
+                "num_days_ago": num_days_ago,
+                "run_id": run_id,
+            },
+        )
+
+    def find_referenced_fix_statements(self, org_id: int, text: str) -> dict[str, Any]:
+        data = self.call(
+            "find_referenced_fix_statements",
+            {"org_id": org_id, "text": text},
+        )
+        return data if isinstance(data, dict) else {}
+
+    def has_repo_code_mappings(
+        self,
+        *,
+        organization_id: int,
+        provider: str,
+        external_id: str,
+        owner: str,
+        name: str,
+    ) -> dict[str, Any]:
+        data = self.call(
+            "has_repo_code_mappings",
+            {
+                "organization_id": organization_id,
+                "provider": provider,
+                "external_id": external_id,
+                "owner": owner,
+                "name": name,
+            },
+        )
+        return data if isinstance(data, dict) else {}
+
+    def get_repo_installation_id(
+        self,
+        *,
+        organization_id: int,
+        provider: str,
+        external_id: str,
+        owner: str,
+        name: str,
+    ) -> dict[str, Any]:
+        data = self.call(
+            "get_repo_installation_id",
+            {
+                "organization_id": organization_id,
+                "provider": provider,
+                "external_id": external_id,
+                "owner": owner,
+                "name": name,
+            },
+        )
+        return data if isinstance(data, dict) else {}

@@ -13,6 +13,7 @@ from ..db import session_scope
 from ..models import SeerAssistedQuery, SeerRun, SeerServiceMap
 from ..services.llm import ProviderError, get_provider
 from ..services.usage import check_quota
+from . import indexing, lifecycle
 from .assisted import (
     assisted_query_state,
     compare_cohorts,
@@ -22,9 +23,6 @@ from .assisted import (
     store_coding_agent_states,
     translate_query,
     update_coding_agent_state,
-)
-from .assisted import (
-    export_indexes as export_index_data,
 )
 from .auth import SeerContext, authenticate
 from .codereview import execute_code_review
@@ -233,6 +231,7 @@ async def explorer_update(
     run = _load_run(payload.run_id, auth)
     payload_type = payload.payload.get("type")
     if payload_type == "interrupt":
+        current = None
         with session_scope() as session:
             current = session.get(SeerRun, payload.run_id)
             if current is not None:
@@ -243,29 +242,52 @@ async def explorer_update(
                     block(step="chat", content="Run interrupted by the user."),
                 )
                 session.commit()
+                session.expunge(current)
+        if current is not None:
+            lifecycle.emit_webhook(
+                current, lifecycle.STOPPED, {"stop": {"reason": "user_interrupt"}}
+            )
         return {"status": "accepted"}
     if payload_type == "user_input_response":
+        response_text = _user_input_text(payload.payload)
+        resume = False
         with session_scope() as session:
             current = session.get(SeerRun, payload.run_id)
             if current is not None:
                 append_block(
                     current,
-                    block(
-                        step="chat",
-                        content=json.dumps(payload.payload.get("response_data") or {}, default=str),
-                        role="user",
-                    ),
+                    block(step="chat", content=response_text, role="user"),
                 )
-                current.status = "completed"
+                metadata = dict(current.run_metadata or {})
+                metadata.pop("pending_user_input", None)
+                current.run_metadata = metadata
+                if current.kind == "explorer" or current.feature_id is None:
+                    current.payload = {
+                        **(current.payload or {}),
+                        "query": response_text,
+                    }
+                    current.status = "processing"
+                    current.failure_reason = None
+                    resume = True
+                else:
+                    current.status = "completed"
                 session.commit()
+        if resume:
+            await _schedule("execute_chat_job", payload.run_id)
         return {"status": "accepted"}
     if payload_type == "select_solution":
+        resume_code = False
         with session_scope() as session:
             current = session.get(SeerRun, payload.run_id)
             if current is not None:
+                selection = (
+                    payload.payload.get("solution")
+                    or payload.payload.get("selected_solution")
+                    or payload.payload
+                )
                 current.run_metadata = {
                     **(current.run_metadata or {}),
-                    "selected_solution": payload.payload,
+                    "selected_solution": selection,
                 }
                 append_block(
                     current,
@@ -275,7 +297,29 @@ async def explorer_update(
                         metadata={"referrer": run.referrer},
                     ),
                 )
+                if current.feature_id in {"autofix", "autofix_rca"}:
+                    payload_data = dict(current.payload or {})
+                    step_args = dict(payload_data.get("step_args") or {})
+                    step_args["selected_solution"] = selection
+                    context = str(payload_data.get("user_context") or "")
+                    payload_data.update(
+                        {
+                            "step": "code_changes",
+                            "step_args": step_args,
+                            "user_context": (
+                                context
+                                + "\n\nSelected solution:\n"
+                                + json.dumps(selection, default=str)
+                            ).strip(),
+                        }
+                    )
+                    current.payload = payload_data
+                    current.status = "processing"
+                    current.failure_reason = None
+                    resume_code = True
                 session.commit()
+        if resume_code:
+            await _schedule("execute_feature_job", payload.run_id)
         return {"status": "accepted"}
     if payload_type in {"create_pr", "create_branch"}:
         pr_payload = dict(payload.payload)
@@ -297,6 +341,7 @@ async def explorer_update(
                     states[name] = {
                         "repo_name": name,
                         "provider": "gitlab" if "gitlab" in str(repo.get("provider", "")) else "github",
+                        "repo_external_id": repo.get("external_id"),
                         "branch_name": None,
                         "pr_number": None,
                         "pr_url": None,
@@ -386,6 +431,7 @@ async def summarize(
         group_id=payload.group_id,
         project_id=payload.project_id,
         viewer=auth.viewer_header,
+        trace_tree=payload.trace_tree,
     )
 
 
@@ -409,23 +455,38 @@ def llm_generate(
 ) -> dict[str, Any]:
     provider = get_provider()
     system = payload.system_prompt or "You are a concise, accurate assistant."
+    schema = payload.response_schema if isinstance(payload.response_schema, dict) else None
+    prompt = payload.prompt
+    if schema:
+        prompt = (
+            payload.prompt
+            + "\n\nReturn a single JSON object matching this schema. "
+            "Do not include markdown fences or prose.\n"
+            + json.dumps(schema, default=str)[:20_000]
+        )
     try:
         text, usage = provider.complete_text(
             system=system,
-            prompt=payload.prompt,
+            prompt=prompt,
             max_tokens=payload.max_tokens,
+            model=payload.model or None,
         )
     except ProviderError as exc:
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    response: Any = text
+    if schema:
+        parsed = _parse_json_object(text)
+        if parsed is not None:
+            response = parsed
     return {
         "content": text,
-        "response": text,
+        "response": response,
         "usage": {
             "prompt_tokens": usage.input_tokens,
             "completion_tokens": usage.output_tokens,
             "total_tokens": usage.input_tokens + usage.output_tokens,
             "dollar_cost": usage.cost_usd,
-            "model": provider.model,
+            "model": payload.model or provider.model,
         },
     }
 
@@ -442,14 +503,65 @@ def oneshot(payload: OneShotRequest, auth: SeerContext = Depends(authenticate)) 
     )
 
 
+def _index_request(
+    payload: GenericPayload, auth: SeerContext
+) -> tuple[int, list[int], list[RepoDefinition], bool]:
+    data = payload.model_dump()
+    org_id = _org_id(auth, data.get("organization_id") or data.get("org_id"))
+    project_ids: list[int] = []
+    raw_projects = data.get("project_ids") or []
+    if isinstance(raw_projects, list):
+        project_ids.extend(int(item) for item in raw_projects if str(item).isdigit())
+    for key in ("project_id", "run_id"):
+        value = data.get(key)
+        if key == "run_id" and value is not None:
+            if not str(value).isdigit():
+                continue
+            run = _load_run(int(value), auth)
+            if run.project_id is not None:
+                project_ids.append(run.project_id)
+            continue
+        if value is not None and str(value).isdigit():
+            project_ids.append(int(value))
+    repos = [
+        RepoDefinition.from_wire(item)
+        for item in data.get("repos") or []
+        if isinstance(item, dict)
+    ]
+    return org_id, sorted(set(project_ids)), repos, bool(data.get("full"))
+
+
+def _schedule_index(org_id: int, project_ids: list[int], repos: list[RepoDefinition], viewer: str | None, full: bool) -> None:
+    task = asyncio.create_task(
+        asyncio.to_thread(
+            indexing.index_org_repos,
+            org_id,
+            viewer,
+            project_ids=project_ids,
+            repos=repos or None,
+            full=full,
+        )
+    )
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
 @router.post("/automation/explorer/index", status_code=status.HTTP_202_ACCEPTED)
-def index_project(auth: SeerContext = Depends(authenticate)) -> dict[str, Any]:
-    return {"status": "accepted"}
+async def index_project(
+    payload: GenericPayload, auth: SeerContext = Depends(authenticate)
+) -> dict[str, Any]:
+    org_id, project_ids, repos, full = _index_request(payload, auth)
+    _schedule_index(org_id, project_ids, repos, auth.viewer_header, full)
+    return {"status": "accepted", "org_id": org_id}
 
 
 @router.post("/automation/explorer/index/org-repo-knowledge", status_code=status.HTTP_202_ACCEPTED)
-def index_repo_knowledge(auth: SeerContext = Depends(authenticate)) -> dict[str, Any]:
-    return {"status": "accepted"}
+async def index_repo_knowledge(
+    payload: GenericPayload, auth: SeerContext = Depends(authenticate)
+) -> dict[str, Any]:
+    org_id, project_ids, repos, full = _index_request(payload, auth)
+    _schedule_index(org_id, project_ids, repos, auth.viewer_header, full)
+    return {"status": "accepted", "org_id": org_id}
 
 
 @router.post("/automation/explorer/index/org-project-knowledge", status_code=status.HTTP_202_ACCEPTED)
@@ -466,7 +578,7 @@ def index_sentry_knowledge(auth: SeerContext = Depends(authenticate)) -> dict[st
 def export_indexes(
     payload: ExportIndexesRequest, auth: SeerContext = Depends(authenticate)
 ) -> dict[str, Any]:
-    return export_index_data(payload.org_id)
+    return indexing.export_org_indexes(payload.org_id, auth.viewer_header)
 
 
 def _as_int(value: Any) -> int | None:
@@ -474,6 +586,46 @@ def _as_int(value: Any) -> int | None:
         return int(value)
     except (TypeError, ValueError):
         return None
+
+
+def _parse_json_object(text: str) -> dict[str, Any] | None:
+    value = (text or "").strip()
+    if value.startswith("```"):
+        lines = value.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        value = "\n".join(lines).strip()
+    for candidate in (value, value[value.find("{") : value.rfind("}") + 1]):
+        try:
+            data = json.loads(candidate)
+        except (json.JSONDecodeError, ValueError):
+            continue
+        if isinstance(data, dict):
+            return data
+    return None
+
+
+def _user_input_text(payload: dict[str, Any]) -> str:
+    """Normalize the several user-input response shapes Sentry can send."""
+    for key in ("response", "answer", "text", "value"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value[:20_000]
+    data = payload.get("response_data")
+    if isinstance(data, str) and data.strip():
+        return data[:20_000]
+    if isinstance(data, dict):
+        for key in ("response", "answer", "text", "value", "selected", "choice"):
+            value = data.get(key)
+            if isinstance(value, str) and value.strip():
+                return value[:20_000]
+        selected = data.get("selected_options")
+        if isinstance(selected, list) and selected:
+            return ", ".join(str(item) for item in selected)[:20_000]
+        return json.dumps(data, default=str)[:20_000]
+    return json.dumps(payload or {}, default=str)[:20_000]
 
 @router_v0.post("/v0/issues/supergroups/cluster-lightweight")
 def supergroup_cluster(

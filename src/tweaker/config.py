@@ -79,6 +79,9 @@ class Settings(BaseSettings):
     seer_allow_unsigned: bool = False
     seer_rate_limit_per_minute: int = 600
     seer_request_timeout: float = 30.0
+    # Emit ``seer.*`` lifecycle webhooks and PR-created notifications. Disable
+    # for air-gapped installs where Sentry cannot receive RPC callbacks.
+    seer_webhooks_enabled: bool = True
     seer_repos_dir: Path = Path("./data/seer-repos")
     github_token: str | None = Field(
         default=None,

@@ -43,30 +43,30 @@ Sentry workflow.
 | `GET /v1/models` | Implemented |
 | `POST /v1/automation/agent/feature/run` | Implemented (`autofix`, `autofix_single_run`) |
 | `POST /v1/automation/explorer/chat` | Implemented (Seer Agent) |
-| `POST /v1/automation/explorer/state` | Implemented |
-| `POST /v1/automation/explorer/update` | Implemented (`create_pr`) |
+| `POST /v1/automation/explorer/state` | Implemented (including `awaiting_user_input`) |
 | `POST /v1/automation/explorer/repos` | Implemented |
 | `POST /v1/automation/explorer/state/pr` | Implemented |
 | `POST /v1/automation/explorer/runs/by-ids` | Implemented |
-| `POST /v1/automation/explorer/update` | `create_pr`, `create_branch`, `select_solution`, `user_input_response`, `interrupt` |
+| `POST /v1/automation/explorer/update` | `create_pr`, `create_branch`, `select_solution` (starts code changes), `user_input_response` (resumes), `interrupt` |
 | `POST /v1/automation/summarize/issue` | Implemented |
 | `POST /v1/automation/summarize/fixability` | Implemented |
 | `POST /v1/llm/generate` | Implemented |
 | `POST /v1/automation/oneshot/run` | `issue_view_title`, `chat_suggestions`, `agent_question`, `inbound_filter_name`, `autofix_issue_data_judge` |
 | `POST /v1/automation/coding-agent/state/update` | Implemented |
 | `POST /v1/automation/coding-agent/state/set` | Implemented |
-| `POST /v1/pr-metrics/delegated-agent-match` | Implemented |
-| `POST /v1/assisted-query/start`, `/state`, `/translate-agentic` | Implemented with heuristic/LLM query translation |
+| `POST /v1/pr-metrics/delegated-agent-match` | Matches by branch, PR URL, or pull request id |
+| `POST /v1/assisted-query/start`, `/state`, `/translate-agentic` | Implemented; translates and executes the query against Sentry |
 | `POST /v1/workflows/compare/cohort` | Implemented (cohort statistics) |
-| `POST /v1/explorer/service-map/update` | Accepted; service-map storage is not persisted yet |
+| `POST /v1/explorer/service-map/update` | Persisted per organization |
 | `POST /v0/issues/supergroups/cluster-lightweight`, `/get`, `/get-by-group-ids` | Implemented with local supergroup clustering |
 | `POST /v0/issues/similar-issues` | Implemented with local stack-trace similarity |
 | `GET /v0/issues/similar-issues/grouping-record/delete/{project_id}` | Implemented |
-| `/v1/anomaly-detection/detect`, `/store`, `/delete-alert-data`, `/alert-data` | Implemented with robust z-score detection |
-| `/v1/code_review`, `/check/rerun`, `/review-request`, `/pr-closed` | Check run/commit status, inline review comments, annotations, rerun, and PR-closed cancellation |
+| `/v1/anomaly-detection/detect`, `/store`, `/delete-alert-data`, `/alert-data` | Persisted detector history and threshold data; sensitivity/direction-aware robust z-score |
+| `/v1/code_review`, `/check/rerun`, `/review-request`, `/pr-closed` | Check run/commit status, inline review comments, annotations, `original_run_id` rerun, and PR-closed cancellation |
 | `/v1/offboarding/repository` | Accepted |
-| Explorer indexing / export endpoints | Indexing accepted as no-ops; export returns the expected envelope |
-| Seer → Sentry RPC | Implemented for issue/event/repo/committer/ownership/search/trace/log/metric/replay/profile/dsn/baseline/completion-hook calls |
+| Explorer indexing / export endpoints | Builds and exports the local code index for org/project repositories |
+| Seer → Sentry RPC | Issue/event/repo/committer/ownership/search/trace/log/metric/replay/profile/dsn/baseline, feature delivery, PR-created notification, and completion-hook calls |
+| Seer → Sentry lifecycle webhooks | `root_cause_*`, `solution_*`, `coding_*`, `pr_created`, `pr_ready_for_review`, `iteration_*`, `errored`, `stopped` |
 
 Autofix produces the same block and artifact shapes Sentry's drawer expects:
 `root_cause`, `solution`, `merged_file_patches`, `repo_pr_states`, and the
@@ -77,10 +77,16 @@ reconcile milestones.
 
 The Seer Agent path runs a bounded model-driven tool loop: it can search Sentry
 issues, load events and ownership, search/read repository code, inspect traces,
-logs, metrics, replays, DSNs, and baseline tag distributions, and call
-user-supplied custom tools. Tool calls and results are written into the run state
-as `tool_use` blocks, which Sentry's Explorer UI can render. The deterministic
-demo provider keeps the one-shot retrieval path for air-gapped use.
+logs, metrics, profiles, replays, span attributes, DSNs, and baseline tag
+distributions, run events/timeseries/trace queries, find issues by repository,
+file, function, or exception type, resolve team/project members and assignees,
+read file history/blame/commits, and call user-supplied custom tools. The loop
+honors Sentry's `max_iterations` and `enable_investigation_tools` run options.
+The `ask_user_question` tool pauses a run with `status: "awaiting_user_input"` and
+a `pending_user_input` payload; a follow-up chat or `user_input_response` update
+resumes it. Tool calls and results are written into the run state as `tool_use`
+blocks, which Sentry's Explorer UI can render. The deterministic demo provider
+keeps the one-shot retrieval path for air-gapped use.
 
 See [docs/parity.md](docs/parity.md) for the full endpoint and capability
 matrix, [docs/seer-compatibility.md](docs/seer-compatibility.md) for wire shapes,
@@ -211,8 +217,11 @@ Sentry's own issue page remains the primary UI for Seer workflows.
 ## Operations
 
 - **Code index** — `tweaker index-repos` or `POST /api/repos/{id}/index` builds a
-  local keyword/symbol index. The agent uses it as a fallback when `git grep`
-  finds nothing, and it is useful for large or shallow checkouts.
+  local keyword/symbol index. The Seer contract's
+  `/v1/automation/explorer/index` endpoint indexes the repositories connected to
+  an organization's projects, and `/v1/automation/explorer/export-indexes`
+  exports the indexed files. The agent uses the index as a fallback when
+  `git grep` finds nothing, and it is useful for large or shallow checkouts.
 - **Usage and quotas** — every model call is recorded. `GET /api/usage?org_id=`
   returns tokens, cost, model calls, runs, and the active quota.
   `PUT /api/usage/quota/{org_id}` sets monthly token, cost, and run limits.
@@ -250,6 +259,7 @@ also accepted where noted. See [`.env.example`](.env.example).
 | `TWEAKER_RUNNER` | `inline` (dev) or `arq` (production). |
 | `TWEAKER_REPO_MAP` | JSON map of `owner/name` to local checkout paths. |
 | `TWEAKER_SEER_RATE_LIMIT_PER_MINUTE` | Per-IP Seer API limit; `0` disables. |
+| `TWEAKER_SEER_WEBHOOKS_ENABLED` | Emit `seer.*` lifecycle webhooks and PR notifications; disable for air-gapped installs. |
 | `TWEAKER_MAX_REQUEST_BYTES` | Maximum request body size. |
 | `TWEAKER_GITHUB_TOKEN` / `TWEAKER_GITLAB_TOKEN` | Cloud clone and PR/MR credentials. |
 | `TWEAKER_GITHUB_ENTERPRISE_URL` / `*_TOKEN` | GitHub Enterprise base URL and token. |
@@ -297,17 +307,19 @@ stubs rather than Seer's production models:
 
 - No billing/credits/Seer Wallet.
 - Anomaly detection, similarity, and supergroups use local statistical/text
-  heuristics, not Seer's trained embedding models.
-- Service maps are accepted but not persisted.
+  heuristics, not Seer's trained embedding models. Detector history and
+  threshold data are persisted, but the model is a robust z-score, not Prophet.
+- Service maps are persisted per organization; they are not used to enrich agent
+  context yet.
 - Datadog/GCP/Grafana provider metadata is passed to the agent, but Tweaker does
   not call those services.
 - Code review posts a check run/commit status and inline review comments; it does not reproduce every Seer review heuristic.
 - Automatic PR iteration driven by CI/review comments is partial: feedback is
   applied to the existing branch/PR, but Sentry's full reaction loop is not
   replicated.
-- The full Seer Agent surface (dashboards, monitors, issue mutation, code mode,
-  interactive approvals) is not implemented. Custom tools are supported when
-  the model selects one.
+- The Seer Agent supports interactive `ask_user_question` approvals. Dashboards,
+  monitors, issue mutation, and code-mode execution are not implemented. Custom
+  tools are supported when the model selects one.
 
 The operator console is not a replacement for Sentry's UI. Test against the
 exact Sentry release you run.

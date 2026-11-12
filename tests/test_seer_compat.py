@@ -803,3 +803,275 @@ def test_similar_issues_training_mode_returns_no_grouping(client):
     response = client.post("/v0/issues/similar-issues", content=body, headers=headers)
     assert response.status_code == 200
     assert response.json()["responses"] == []
+
+
+def test_single_run_emits_lifecycle_signals(client, monkeypatch):
+    calls: list[tuple[str, dict]] = []
+
+    def recording_call(self, method, args):
+        calls.append((method, args))
+        return _fake_call(self, method, args)
+
+    monkeypatch.setattr(SentryRPCClient, "call", recording_call)
+    payload = {
+        "feature_id": "autofix_single_run",
+        "payload": {
+            "group_id": GROUP_ID,
+            "project_id": 2,
+            "short_id": "BACKEND-1A2B",
+            "title": "KeyError: 'SPRING25'",
+            "culprit": "app.checkout.apply_discount",
+            "stopping_point": "code_changes",
+        },
+        "referrer": "api.web",
+        "ref": "33333333-3333-3333-3333-333333333333",
+    }
+    body, headers = _signed(payload)
+    response = client.post("/v1/automation/agent/feature/run", content=body, headers=headers)
+    assert response.status_code == 200
+    session = _wait(client, response.json()["run_id"])
+    assert session["status"] == "completed"
+
+    methods = [method for method, _ in calls]
+    assert "send_seer_webhook" in methods
+    assert "deliver_feature_result" in methods
+    names = [
+        args["event_name"]
+        for method, args in calls
+        if method == "send_seer_webhook"
+    ]
+    assert "root_cause_started" in names
+    assert "root_cause_completed" in names
+    assert "solution_started" in names
+    assert "solution_completed" in names
+    assert "coding_started" in names
+    assert "coding_completed" in names
+
+    delivery = next(args for method, args in calls if method == "deliver_feature_result")
+    assert delivery["run_uuid"] == "33333333-3333-3333-3333-333333333333"
+    assert delivery["status"] == "completed"
+
+
+def test_index_endpoint_accepts_and_exports(client):
+    body, headers = _signed({"organization_id": ORG_ID, "project_ids": [2]})
+    response = client.post(
+        "/v1/automation/explorer/index", content=body, headers=headers
+    )
+    assert response.status_code == 202
+    assert response.json()["status"] == "accepted"
+
+    body, headers = _signed({"org_id": ORG_ID})
+    response = client.post(
+        "/v1/automation/explorer/export-indexes", content=body, headers=headers
+    )
+    assert response.status_code == 200
+    data = response.json()
+    assert data["org_id"] == ORG_ID
+    assert data["version"] == 1
+    assert isinstance(data["tables"], dict)
+
+
+def test_select_solution_generates_code_changes(client, monkeypatch):
+    monkeypatch.setattr(SentryRPCClient, "call", _fake_call)
+    from tweaker.db import session_scope
+    from tweaker.models import SeerRun
+    from tweaker.seer.state import block
+
+    with session_scope() as session:
+        run = SeerRun(
+            org_id=ORG_ID,
+            org_slug="acme",
+            project_id=2,
+            group_id=GROUP_ID,
+            feature_id="autofix",
+            kind="feature",
+            status="completed",
+            title="Autofix — BACKEND-1A2B",
+            blocks=[block(step="root_cause", content="Unknown coupon code.")],
+            payload={"step": "solution"},
+            run_metadata={
+                "repos": [
+                    {
+                        "provider": "github",
+                        "owner": "acme",
+                        "name": "store",
+                        "external_id": "42",
+                        "branch_name": "main",
+                        "code_mappings": [],
+                    }
+                ]
+            },
+            repo_pr_states={},
+            coding_agents={},
+            queued_feedback=[],
+            usage={"usages": []},
+            referrer="api.web",
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+
+    body, headers = _signed(
+        {
+            "run_id": run_id,
+            "organization_id": ORG_ID,
+            "payload": {
+                "type": "select_solution",
+                "solution": {"one_line_summary": "Guard the discount lookup."},
+            },
+        }
+    )
+    response = client.post(
+        "/v1/automation/explorer/update", content=body, headers=headers
+    )
+    assert response.status_code == 202
+    session = _wait(client, run_id)
+    assert session["status"] == "completed"
+    steps = [block["message"]["metadata"]["step"] for block in session["blocks"]]
+    assert "code_changes" in steps
+    code = next(
+        block
+        for block in session["blocks"]
+        if block["message"]["metadata"]["step"] == "code_changes"
+    )
+    assert code["merged_file_patches"]
+
+
+def test_delegated_agent_match_by_pull_request_id(client):
+    from tweaker.db import session_scope
+    from tweaker.models import SeerRun
+
+    with session_scope() as session:
+        run = SeerRun(
+            org_id=ORG_ID,
+            org_slug="acme",
+            project_id=2,
+            group_id=GROUP_ID,
+            feature_id="autofix",
+            kind="feature",
+            status="completed",
+            title="PR id match",
+            blocks=[],
+            payload={},
+            run_metadata={},
+            repo_pr_states={
+                "acme/store": {
+                    "repo_name": "acme/store",
+                    "provider": "github",
+                    "branch_name": "tweaker/fix-77",
+                    "pr_url": "https://github.com/acme/store/pull/77",
+                    "pr_id": "77",
+                    "pr_number": 77,
+                    "pr_creation_status": "completed",
+                }
+            },
+            coding_agents={},
+            queued_feedback=[],
+            usage={"usages": []},
+            referrer="api.web",
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+
+    body, headers = _signed(
+        {
+            "organization_id": ORG_ID,
+            "pull_request_id": 77,
+            "repo": {"owner": "acme", "name": "store"},
+        }
+    )
+    response = client.post(
+        "/v1/pr-metrics/delegated-agent-match", content=body, headers=headers
+    )
+    assert response.status_code == 200
+    assert response.json()["run_id"] == run_id
+    assert response.json()["signal_type"] == "pull_request_id"
+
+
+def test_llm_generate_honors_schema_and_model(client, monkeypatch):
+    from tweaker.seer import endpoints
+    from tweaker.services.llm.base import Usage
+
+    class FakeProvider:
+        name = "fake"
+        model = "default-model"
+
+        def complete_text(self, *, system, prompt, max_tokens=4000, model=None):
+            assert model == "requested-model"
+            assert "properties" in prompt
+            return '{"title": "Checkout failures"}', Usage(input_tokens=3, output_tokens=2)
+
+    monkeypatch.setattr(endpoints, "get_provider", lambda: FakeProvider())
+    body, headers = _signed(
+        {
+            "prompt": "Name this search",
+            "model": "requested-model",
+            "response_schema": {
+                "type": "object",
+                "properties": {"title": {"type": "string"}},
+            },
+        }
+    )
+    response = client.post("/v1/llm/generate", content=body, headers=headers)
+    assert response.status_code == 200
+    data = response.json()
+    assert data["response"] == {"title": "Checkout failures"}
+    assert data["usage"]["model"] == "requested-model"
+
+
+def test_user_input_response_resumes_explorer_run(client):
+    from tweaker.db import session_scope
+    from tweaker.models import SeerRun
+
+    with session_scope() as session:
+        run = SeerRun(
+            org_id=ORG_ID,
+            org_slug="acme",
+            project_id=2,
+            group_id=GROUP_ID,
+            feature_id=None,
+            kind="explorer",
+            status="awaiting_user_input",
+            title="Seer Agent",
+            blocks=[],
+            payload={"query": "Investigate this issue"},
+            run_metadata={
+                "pending_user_input": {
+                    "id": "pending-1",
+                    "input_type": "ask_user_question",
+                    "data": {"question": "Which repo?"},
+                }
+            },
+            repo_pr_states={},
+            coding_agents={},
+            queued_feedback=[],
+            usage={"usages": []},
+            referrer="seer.explorer",
+        )
+        session.add(run)
+        session.flush()
+        run_id = run.id
+
+    body, headers = _signed(
+        {
+            "run_id": run_id,
+            "organization_id": ORG_ID,
+            "payload": {
+                "type": "user_input_response",
+                "response_data": {"response": "acme/store"},
+            },
+        }
+    )
+    response = client.post(
+        "/v1/automation/explorer/update", content=body, headers=headers
+    )
+    assert response.status_code == 202
+    session = _wait(client, run_id)
+    assert session["status"] == "completed"
+    assert session["pending_user_input"] is None
+    assert any(
+        block["message"]["role"] == "user"
+        and "acme/store" in block["message"]["content"]
+        for block in session["blocks"]
+    )

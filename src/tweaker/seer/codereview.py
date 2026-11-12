@@ -8,6 +8,7 @@ from typing import Any
 from urllib.parse import quote
 
 import httpx
+from sqlalchemy import select
 
 from ..config import get_settings
 from ..db import session_scope
@@ -25,6 +26,23 @@ CHECK_NAME = "Tweaker code review"
 def create_code_review(payload: dict[str, Any], org_id: int) -> SeerCodeReview:
     data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
     repo = data.get("repo") if isinstance(data.get("repo"), dict) else {}
+    original = _original_review(payload)
+    if original is not None:
+        with session_scope() as session:
+            rerun = SeerCodeReview(
+                org_id=original.org_id,
+                provider=original.provider,
+                owner=original.owner,
+                name=original.name,
+                pr_id=original.pr_id,
+                base_sha=original.base_sha,
+                status="processing",
+                payload=original.payload,
+            )
+            session.add(rerun)
+            session.commit()
+            session.refresh(rerun)
+            return rerun
     with session_scope() as session:
         item = SeerCodeReview(
             org_id=org_id,
@@ -39,6 +57,30 @@ def create_code_review(payload: dict[str, Any], org_id: int) -> SeerCodeReview:
         session.add(item)
         session.commit()
         session.refresh(item)
+        return item
+
+
+def _original_review(payload: dict[str, Any]) -> SeerCodeReview | None:
+    """Resolve ``original_run_id`` from a GitHub check-run rerun request.
+
+    Sentry forwards the ``external_id`` of the original check run, which Tweaker
+    sets to the numeric review id. Older payloads may carry it inside ``data``.
+    """
+    raw = payload.get("original_run_id")
+    if raw is None and isinstance(payload.get("data"), dict):
+        raw = payload["data"].get("original_run_id")
+    if raw is None:
+        return None
+    text = str(raw)
+    with session_scope() as session:
+        item = session.get(SeerCodeReview, int(text)) if text.isdigit() else None
+        if item is None:
+            item = session.scalar(
+                select(SeerCodeReview).where(SeerCodeReview.check_run_id == text)
+            )
+        if item is None:
+            return None
+        session.expunge(item)
         return item
 
 
@@ -327,6 +369,7 @@ def _start_check_run(
             json={
                 "name": CHECK_NAME,
                 "head_sha": head_sha,
+                "external_id": str(item.id),
                 "status": "in_progress",
                 "started_at": datetime.now(UTC).isoformat(),
                 "output": {

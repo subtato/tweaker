@@ -240,6 +240,161 @@ class RepositoryWorkspace:
                         candidates.append(rel)
         return candidates[:5]
 
+    def list_directory(self, relative: str = "", limit: int = 200) -> dict[str, Any]:
+        """List entries in a repository directory without escaping the checkout."""
+        if self.root is None:
+            self.ensure()
+        assert self.root is not None
+        path = self._safe_path(relative or ".")
+        if path is None or not path.is_dir():
+            return {"error": f"Directory not found: {relative or '.'}"}
+        entries: list[dict[str, Any]] = []
+        try:
+            children = sorted(path.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower()))
+        except OSError as exc:
+            return {"error": f"Could not read directory: {exc}"}
+        for child in children:
+            if child.name in {".git", "node_modules", ".venv", "venv", "dist", "build"}:
+                continue
+            try:
+                rel = self._relative(child)
+            except ValueError:
+                continue
+            item: dict[str, Any] = {
+                "name": child.name,
+                "path": rel,
+                "type": "directory" if child.is_dir() else "file",
+            }
+            if child.is_file():
+                try:
+                    item["size"] = child.stat().st_size
+                except OSError:
+                    item["size"] = None
+            entries.append(item)
+            if len(entries) >= max(1, min(limit, 500)):
+                break
+        return {"path": relative or ".", "entries": entries}
+
+    def find_files(self, pattern: str, limit: int = 100) -> list[dict[str, Any]]:
+        """Find files by glob pattern (``**/*.py``) inside the checkout."""
+        if self.root is None:
+            self.ensure()
+        assert self.root is not None
+        cleaned = (pattern or "").strip().replace("\\", "/").lstrip("/")
+        if not cleaned or len(cleaned) > 300 or ".." in cleaned.split("/"):
+            return []
+        results: list[dict[str, Any]] = []
+        try:
+            matches = self.root.glob(cleaned)
+            for match in matches:
+                if len(results) >= max(1, min(limit, 500)):
+                    break
+                if not match.is_file() or ".git" in match.parts:
+                    continue
+                try:
+                    results.append(
+                        {
+                            "path": self._relative(match),
+                            "size": match.stat().st_size,
+                        }
+                    )
+                except (OSError, ValueError):
+                    continue
+        except (OSError, ValueError):
+            return []
+        return results
+
+    def get_file_history(
+        self, relative: str, limit: int = 20
+    ) -> dict[str, Any]:
+        """Return recent commits touching a path using ``git log``."""
+        if self.root is None:
+            self.ensure()
+        assert self.root is not None
+        path = self._safe_path(relative)
+        if path is None or not path.is_file():
+            return {"error": f"File not found: {relative}"}
+        if not (self.root / ".git").exists():
+            return {"error": "This checkout is not a git repository"}
+        rel = self._relative(path)
+        result = self._run_git(
+            [
+                "log",
+                f"-n{max(1, min(limit, 100))}",
+                "--date=iso-strict",
+                "--format=%H%x09%an%x09%ad%x09%s",
+                "--",
+                rel,
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            return {"error": _git_error(result)}
+        commits = []
+        for line in result.stdout.splitlines():
+            parts = line.split("\t", 3)
+            if len(parts) == 4:
+                commits.append(
+                    {
+                        "sha": parts[0],
+                        "author": parts[1],
+                        "date": parts[2],
+                        "message": parts[3][:500],
+                    }
+                )
+        return {"path": rel, "commits": commits}
+
+    def git_blame(
+        self, relative: str, line: int | None = None, context: int = 12
+    ) -> dict[str, Any]:
+        """Return ``git blame`` output for a file or a small window around a line."""
+        if self.root is None:
+            self.ensure()
+        assert self.root is not None
+        path = self._safe_path(relative)
+        if path is None or not path.is_file():
+            return {"error": f"File not found: {relative}"}
+        if not (self.root / ".git").exists():
+            return {"error": "This checkout is not a git repository"}
+        rel = self._relative(path)
+        args = ["blame", "--date=iso-strict", "-L"]
+        if line and line > 0:
+            start = max(1, int(line) - max(1, context))
+            end = int(line) + max(1, context)
+            args.append(f"{start},{end}")
+        else:
+            args.append("1,200")
+        args.extend(["--", rel])
+        result = self._run_git(args, check=False)
+        if result.returncode != 0:
+            return {"error": _git_error(result)}
+        return {"path": rel, "blame": result.stdout.splitlines()[:400]}
+
+    def get_commit(self, sha: str) -> dict[str, Any]:
+        """Return a commit's metadata and changed-file summary."""
+        if self.root is None:
+            self.ensure()
+        assert self.root is not None
+        cleaned = (sha or "").strip()
+        if not cleaned or len(cleaned) > 100 or not re.fullmatch(r"[0-9A-Za-z._/-]+", cleaned):
+            return {"error": "Invalid commit SHA"}
+        if not (self.root / ".git").exists():
+            return {"error": "This checkout is not a git repository"}
+        result = self._run_git(
+            [
+                "show",
+                "--no-color",
+                "--date=iso-strict",
+                "--format=%H%x09%an%x09%ae%x09%ad%x09%s",
+                "--stat",
+                cleaned,
+            ],
+            check=False,
+        )
+        if result.returncode != 0:
+            return {"error": _git_error(result)}
+        return {"sha": cleaned, "output": result.stdout[:20_000]}
+
     def search(self, query: str, max_results: int = 12) -> list[dict[str, Any]]:
         if self.root is None:
             self.ensure()

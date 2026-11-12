@@ -80,6 +80,7 @@ class LLMProvider:
         system: str,
         prompt: str,
         max_tokens: int = 4000,
+        model: str | None = None,
     ) -> tuple[str, Usage]:
         raise NotImplementedError
 
