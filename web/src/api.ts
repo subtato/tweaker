@@ -145,6 +145,7 @@ export const api = {
       `/api/seer-runs${qs(params)}`,
     ),
   seerRun: (id: number) => request<import("./types").SeerRunDetail>(`/api/seer-runs/${id}`),
+  codeReviews: () => request<{ items: import("./types").CodeReviewSummary[] }>("/api/code-reviews?limit=5"),
 
   stats: (orgId: string) => request<Stats>(`/api/stats${qs({ org_id: orgId })}`),
   usage: (orgId?: string) => request<import("./types").UsageSummary>(`/api/usage${qs({ org_id: orgId })}`),

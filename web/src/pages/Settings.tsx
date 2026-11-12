@@ -16,7 +16,7 @@ import { api } from "../api";
 import { CopyButton, PageHeader, SectionHead, Toggle } from "../components/Ui";
 import { formatNumber } from "../lib";
 import { useOrg } from "../OrgContext";
-import type { AppConfig, ConnectionTest, Organization, Repository, UsageSummary } from "../types";
+import type { AppConfig, CodeReviewSummary, ConnectionTest, Organization, Repository, UsageSummary } from "../types";
 
 export function SettingsPage({ config }: { config: AppConfig }) {
   const { org, refreshOrgs } = useOrg();
@@ -40,6 +40,7 @@ export function SettingsPage({ config }: { config: AppConfig }) {
   });
   const [repoBusy, setRepoBusy] = useState(false);
   const [usage, setUsage] = useState<UsageSummary | null>(null);
+  const [codeReviews, setCodeReviews] = useState<CodeReviewSummary[]>([]);
 
   useEffect(() => {
     if (!org) return;
@@ -54,6 +55,7 @@ export function SettingsPage({ config }: { config: AppConfig }) {
     });
     api.repos(org.id).then(setRepos).catch(() => undefined);
     api.usage().then(setUsage).catch(() => undefined);
+    api.codeReviews().then((data) => setCodeReviews(data.items)).catch(() => undefined);
   }, [org?.id]);
 
   if (!org) return null;
@@ -325,6 +327,32 @@ SEER_RPC_SHARED_SECRET=<same as Tweaker>`;
             Quotas are enforced by the Seer API per organization. Set them through
             <code>PUT /api/usage/quota/&lt;org_id&gt;</code>. No quota means unlimited.
           </p>
+        </section>
+
+        <section className="card settings-card">
+          <SectionHead
+            title="Recent code reviews"
+            subtitle="Check runs and inline review comments posted to pull requests."
+          />
+          <div className="review-list">
+            {codeReviews.map((review) => (
+              <div className="review-row" key={review.id}>
+                <div>
+                  <strong>{review.repo} #{review.pr_id}</strong>
+                  <span>{review.summary || review.error || "Review in progress"}</span>
+                </div>
+                <div className="review-row__meta">
+                  <span className={`run-status run-status--${review.status}`}>{review.status}</span>
+                  {review.check_run_url && (
+                    <a className="text-link" href={review.check_run_url} target="_blank" rel="noreferrer">
+                      check run
+                    </a>
+                  )}
+                </div>
+              </div>
+            ))}
+            {!codeReviews.length && <div className="muted-block">No code reviews yet.</div>}
+          </div>
         </section>
 
         <section className="card settings-card">

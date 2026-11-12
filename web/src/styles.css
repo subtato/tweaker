@@ -801,3 +801,11 @@ h1, h2, h3, h4 { letter-spacing: -0.02em; }
 .usage-grid strong { font-size: 16px; letter-spacing: -0.02em; }
 .usage-grid span { font-size: 8.5px; color: var(--text-3); text-transform: uppercase; letter-spacing: 0.08em; }
 @media (max-width: 640px) { .usage-grid { grid-template-columns: 1fr 1fr; } }
+
+/* Code review list */
+.review-list { display: grid; gap: 6px; padding: 0 18px; }
+.review-row { display: flex; justify-content: space-between; gap: 10px; border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; }
+.review-row > div:first-child { display: grid; gap: 2px; min-width: 0; }
+.review-row strong { font-size: 10.5px; }
+.review-row span { font-size: 9px; color: var(--text-3); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.review-row__meta { display: flex; flex-direction: column; align-items: flex-end; gap: 3px; flex: none; }

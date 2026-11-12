@@ -42,10 +42,10 @@ Tweaker targets the Seer contract exercised by the open-source Sentry client
 | `POST /v1/anomaly-detection/store` | Accepted | |
 | `POST /v1/anomaly-detection/delete-alert-data` | Accepted | |
 | `POST /v1/anomaly-detection/alert-data` | Accepted | Empty envelope |
-| `POST /v1/code_review` | Basic | Fetch diff, LLM review, post comment |
-| `POST /v1/code_review/check/rerun` | Basic | Fetch diff, LLM review, post comment |
-| `POST /v1/code_review/review-request` | Basic | Fetch diff, LLM review, post comment |
-| `POST /v1/code_review/pr-closed` | Full | Marks matching reviews closed |
+| `POST /v1/code_review` | Full loop | Check run, inline comments, annotations |
+| `POST /v1/code_review/check/rerun` | Full loop | New check run per rerun |
+| `POST /v1/code_review/review-request` | Full loop | Check run + review comments |
+| `POST /v1/code_review/pr-closed` | Full loop | Cancels matching check runs |
 | `POST /v1/offboarding/repository` | Accepted | |
 
 ## Sentry RPC methods
@@ -86,7 +86,7 @@ routes:
 - Production anomaly detection model.
 - Persisted service maps.
 - Datadog/GCP/Grafana data connectors.
-- Full code review check-run/review-comment loop; basic diff review is implemented.
+- Every Seer code-review heuristic; the check-run/review-comment loop is implemented.
 - Full CI/review-driven PR iteration.
 - Coding-agent handoff execution.
 - Full agent actions (dashboards, monitors, issue mutation, code mode,

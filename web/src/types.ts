@@ -342,3 +342,20 @@ export interface UsageSummary {
     period_start: string | null;
   } | null;
 }
+
+export interface CodeReviewSummary {
+  id: number;
+  org_id: number;
+  provider: string;
+  repo: string;
+  pr_id: string;
+  status: string;
+  conclusion?: string | null;
+  summary?: string | null;
+  comment_count: number;
+  check_run_url?: string | null;
+  review_url?: string | null;
+  error?: string | null;
+  created_at: string;
+  finished_at?: string | null;
+}

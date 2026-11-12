@@ -130,3 +130,9 @@ def test_repo_index_endpoint(client):
     stats = client.get(f"/api/repos/{repo['id']}/index")
     assert stats.status_code == 200
     assert stats.json()["files"] >= 3
+
+
+def test_code_reviews_api(client):
+    response = client.get("/api/code-reviews")
+    assert response.status_code == 200
+    assert "items" in response.json()

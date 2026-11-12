@@ -213,8 +213,8 @@ Sentry's Explorer UI already renders.
 | `POST /v1/anomaly-detection/store` | Accepted; returns `{"success": true}` |
 | `POST /v1/anomaly-detection/delete-alert-data` | Accepted; returns `{"success": true}` |
 | `POST /v1/anomaly-detection/alert-data` | Empty threshold-data envelope |
-| `POST /v1/code_review`, `/check/rerun`, `/review-request` | Basic diff review; posts a PR/MR comment |
-| `POST /v1/code_review/pr-closed` | Accepted |
+| `POST /v1/code_review`, `/check/rerun`, `/review-request` | Creates a check run/commit status, posts inline review comments and annotations, and completes the check |
+| `POST /v1/code_review/pr-closed` | Cancels the matching check run |
 | `POST /v1/offboarding/repository` | Accepted |
 
 ## Blocks and artifacts
@@ -342,8 +342,8 @@ you may need to patch or feature-flag for your deployment.
 - Automatic PR iteration driven by CI/review comments. The `pr_iteration` step
   accepts feedback and updates the existing branch/PR, but Sentry's full
   check-suite/review reaction loop is not replicated.
-- Full code review check-run/review-comment loop. Basic diff review and a
-  summary comment are implemented.
+- Every Seer code-review heuristic. The check-run/review-comment loop is
+  implemented; the model review quality is our own.
 - Coding-agent handoff (Cursor/Claude/Copilot) beyond returning an accepted
   response.
 - The full Seer Agent tool surface: dashboards, monitors, issue mutation,

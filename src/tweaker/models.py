@@ -269,6 +269,15 @@ class SeerCodeReview(Base, TimestampMixin):
     comments: Mapped[list[dict[str, Any]]] = mapped_column(JSON, default=list)
     error: Mapped[str | None] = mapped_column(Text)
     payload: Mapped[dict[str, Any]] = mapped_column(JSON, default=dict)
+    head_sha: Mapped[str | None] = mapped_column(String(100))
+    base_sha: Mapped[str | None] = mapped_column(String(100))
+    check_run_id: Mapped[str | None] = mapped_column(String(100))
+    check_run_url: Mapped[str | None] = mapped_column(String(1000))
+    review_url: Mapped[str | None] = mapped_column(String(1000))
+    conclusion: Mapped[str | None] = mapped_column(String(40))
+    comment_count: Mapped[int] = mapped_column(Integer, default=0)
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class SeerServiceMap(Base, TimestampMixin):

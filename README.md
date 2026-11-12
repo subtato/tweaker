@@ -63,7 +63,7 @@ Sentry workflow.
 | `POST /v0/issues/similar-issues` | Implemented with local stack-trace similarity |
 | `GET /v0/issues/similar-issues/grouping-record/delete/{project_id}` | Implemented |
 | `/v1/anomaly-detection/detect`, `/store`, `/delete-alert-data`, `/alert-data` | Implemented with robust z-score detection |
-| `/v1/code_review`, `/check/rerun`, `/review-request`, `/pr-closed` | Basic implementation: fetch PR diff, LLM review, post PR comment |
+| `/v1/code_review`, `/check/rerun`, `/review-request`, `/pr-closed` | Check run/commit status, inline review comments, annotations, rerun, and PR-closed cancellation |
 | `/v1/offboarding/repository` | Accepted |
 | Explorer indexing / export endpoints | Indexing accepted as no-ops; export returns the expected envelope |
 | Seer → Sentry RPC | Implemented for issue/event/repo/committer/ownership/search/trace/log/metric/replay/profile/dsn/baseline/completion-hook calls |
@@ -83,8 +83,8 @@ as `tool_use` blocks, which Sentry's Explorer UI can render. The deterministic
 demo provider keeps the one-shot retrieval path for air-gapped use.
 
 See [docs/parity.md](docs/parity.md) for the full endpoint and capability
-matrix, and [docs/seer-compatibility.md](docs/seer-compatibility.md) for wire
-shapes.
+matrix, [docs/seer-compatibility.md](docs/seer-compatibility.md) for wire shapes,
+and [docs/code-review.md](docs/code-review.md) for the review loop.
 
 ## Quick start
 
@@ -296,7 +296,7 @@ stubs rather than Seer's production models:
 - Service maps are accepted but not persisted.
 - Datadog/GCP/Grafana provider metadata is passed to the agent, but Tweaker does
   not call those services.
-- Code review provides a basic diff review and PR comment; it does not reproduce Seer's full check-run/review-comment loop.
+- Code review posts a check run/commit status and inline review comments; it does not reproduce every Seer review heuristic.
 - Automatic PR iteration driven by CI/review comments is partial: feedback is
   applied to the existing branch/PR, but Sentry's full reaction loop is not
   replicated.
