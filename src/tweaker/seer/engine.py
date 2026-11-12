@@ -494,7 +494,6 @@ def _execute_single_run(run: SeerRun, session: Any) -> None:
         run.status = "completed"
         return
 
-    settings = get_settings()
     pr_settings = (
         payload.get("pr_internal_settings")
         if isinstance(payload.get("pr_internal_settings"), dict)
@@ -503,7 +502,7 @@ def _execute_single_run(run: SeerRun, session: Any) -> None:
     states = dict(run.repo_pr_states or {})
     failures = 0
     for repo, patch in pairs:
-        token = settings.gitlab_token if repo.is_gitlab else settings.github_token
+        token = RepoManager().token_for(repo)
         try:
             result = create_pull_request(
                 run=run,
@@ -1291,8 +1290,7 @@ def create_pr_for_run(run_id: int, payload: dict[str, Any]) -> None:
             run.failure_reason = "no_code_changes"
             session.commit()
             return
-        settings = get_settings()
-        token = settings.gitlab_token if repo.is_gitlab else settings.github_token
+        token = RepoManager().token_for(repo)
         existing_state = (run.repo_pr_states or {}).get(repo.full_name) or {}
         existing_pr_url = (
             existing_state.get("pr_url") if isinstance(existing_state, dict) else None

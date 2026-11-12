@@ -163,6 +163,9 @@ Tweaker clones code through the same repository coordinates Sentry sends
 
 - **GitHub / GitLab token** — set `TWEAKER_GITHUB_TOKEN` or
   `TWEAKER_GITLAB_TOKEN` for private repositories and PR/MR creation.
+- **GitHub Enterprise / self-hosted GitLab** — set
+  `TWEAKER_GITHUB_ENTERPRISE_URL` / `TWEAKER_GITLAB_SELF_HOSTED_URL` and the
+  matching `*_TOKEN` variables. Base URLs may include a port or path prefix.
 - **Local checkout map** — for air-gapped installs or monorepos:
 
   ```bash
@@ -248,7 +251,9 @@ also accepted where noted. See [`.env.example`](.env.example).
 | `TWEAKER_REPO_MAP` | JSON map of `owner/name` to local checkout paths. |
 | `TWEAKER_SEER_RATE_LIMIT_PER_MINUTE` | Per-IP Seer API limit; `0` disables. |
 | `TWEAKER_MAX_REQUEST_BYTES` | Maximum request body size. |
-| `TWEAKER_GITHUB_TOKEN` / `TWEAKER_GITLAB_TOKEN` | Clone and PR/MR credentials. |
+| `TWEAKER_GITHUB_TOKEN` / `TWEAKER_GITLAB_TOKEN` | Cloud clone and PR/MR credentials. |
+| `TWEAKER_GITHUB_ENTERPRISE_URL` / `*_TOKEN` | GitHub Enterprise base URL and token. |
+| `TWEAKER_GITLAB_SELF_HOSTED_URL` / `*_TOKEN` | Self-hosted GitLab base URL and token. |
 | `ANTHROPIC_API_KEY` | Enables Claude. Default model: `claude-opus-5-5`. |
 | `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL` | OpenAI-compatible endpoint. |
 | `TWEAKER_AI_PROVIDER` | `auto`, `anthropic`, `openai`, `demo`, or `none`. |

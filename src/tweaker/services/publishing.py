@@ -18,6 +18,7 @@ from ..config import get_settings
 from ..crypto import decrypt_secret
 from .codebase import RepositoryWorkspace
 from .patch import check_applies, strip_code_fences
+from .scm import github_api_base, gitlab_api_base
 
 logger = logging.getLogger(__name__)
 
@@ -214,8 +215,7 @@ def _open_pull_request(
 ) -> str | None:
     if repo.provider == "github":
         owner, name = _parse_repo(repo.url)
-        host = urlparse(repo.url).hostname or "github.com"
-        api_base = "https://api.github.com" if host in {"github.com", "www.github.com"} else f"https://{host}/api/v3"
+        api_base = github_api_base(repo.url)
         response = httpx.post(
             f"{api_base}/repos/{owner}/{name}/pulls",
             headers={
@@ -238,9 +238,12 @@ def _open_pull_request(
 
     if repo.provider == "gitlab":
         parsed = urlparse(repo.url)
-        host = parsed.hostname or "gitlab.com"
-        api_base = f"https://{host}/api/v4"
-        project_path = quote("/".join(parsed.path.strip("/").removesuffix(".git").split("/")), safe="")
+        api_base = gitlab_api_base(repo.url)
+        repo_path = parsed.path.strip("/").removesuffix(".git")
+        base_path = urlparse(get_settings().gitlab_base_url).path.strip("/")
+        if base_path and repo_path.startswith(base_path + "/"):
+            repo_path = repo_path[len(base_path) + 1 :]
+        project_path = quote(repo_path, safe="")
         response = httpx.post(
             f"{api_base}/projects/{project_path}/merge_requests",
             headers={"PRIVATE-TOKEN": token},

@@ -6,6 +6,7 @@ from typing import Any
 
 from ..crypto import encrypt_secret
 from ..services.publishing import PublishError, publish_pull_request
+from ..services.scm import token_for
 from .repos import RepoDefinition, RepoManager
 
 logger = logging.getLogger(__name__)
@@ -26,13 +27,16 @@ def create_pull_request(
     existing_pr_url: str | None = None,
     open_pr: bool = True,
 ) -> dict[str, Any]:
-    if not token:
-        raise PublishError(
-            "No source-control token is configured. Set TWEAKER_GITHUB_TOKEN or TWEAKER_GITLAB_TOKEN."
-        )
     manager = RepoManager()
     provider = "gitlab" if repo.is_gitlab else "github"
     remote = manager.remote_url(repo)
+    token = token or token_for(repo.provider, manager.settings, base_url=remote)
+    if not token:
+        raise PublishError(
+            "No source-control token is configured. Set TWEAKER_GITHUB_TOKEN, "
+            "TWEAKER_GITHUB_ENTERPRISE_TOKEN, TWEAKER_GITLAB_TOKEN, or "
+            "TWEAKER_GITLAB_SELF_HOSTED_TOKEN."
+        )
     repo_proxy = SimpleNamespace(
         id=f"seer-{run.id}-{repo.full_name.replace('/', '-')}",
         url=remote,

@@ -16,6 +16,7 @@ from urllib.parse import urlparse
 from ..config import get_settings
 from ..services.codebase import CodebaseContext, RepositoryWorkspace
 from ..services.redaction import compact_event, error_summary, in_app_frames
+from ..services.scm import repo_remote_url, token_for
 
 logger = logging.getLogger(__name__)
 
@@ -99,18 +100,17 @@ class RepoManager:
             self.repo_map = {}
 
     def remote_url(self, repo: RepoDefinition) -> str:
-        if repo.provider_raw and repo.provider_raw.startswith(("http://", "https://")):
-            base = repo.provider_raw.rstrip("/")
-        elif repo.is_gitlab:
-            base = self.settings.gitlab_base_url.rstrip("/")
-        else:
-            base = self.settings.github_base_url.rstrip("/")
-        return f"{base}/{repo.full_name}.git"
+        return repo_remote_url(
+            provider=repo.provider,
+            owner=repo.owner,
+            name=repo.name,
+            provider_raw=repo.provider_raw,
+            github_base_url=self.settings.github_base_url,
+            gitlab_base_url=self.settings.gitlab_base_url,
+        )
 
     def token_for(self, repo: RepoDefinition) -> str | None:
-        if repo.is_gitlab:
-            return self.settings.gitlab_token
-        return self.settings.github_token
+        return token_for(repo.provider, self.settings, base_url=self.remote_url(repo))
 
     def local_override(self, repo: RepoDefinition) -> Path | None:
         for key in (repo.full_name, f"{repo.provider}:{repo.full_name}", repo.external_id):

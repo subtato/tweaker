@@ -45,7 +45,10 @@ GitLab token:
 - `api`
 - `read_repository`
 
-Set `TWEAKER_GITHUB_TOKEN` or `TWEAKER_GITLAB_TOKEN`.
+Set `TWEAKER_GITHUB_TOKEN` or `TWEAKER_GITLAB_TOKEN`. For GitHub Enterprise and
+self-hosted GitLab, set `TWEAKER_GITHUB_ENTERPRISE_URL` /
+`TWEAKER_GITHUB_ENTERPRISE_TOKEN` or `TWEAKER_GITLAB_SELF_HOSTED_URL` /
+`TWEAKER_GITLAB_SELF_HOSTED_TOKEN`. Base URLs may include a port or path prefix.
 
 ## Behavior
 

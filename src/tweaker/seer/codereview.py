@@ -5,7 +5,7 @@ import logging
 import time
 from datetime import UTC, datetime
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 import httpx
 
@@ -14,6 +14,7 @@ from ..db import session_scope
 from ..metrics import counter, observe
 from ..models import SeerCodeReview
 from ..services.llm import ProviderError, get_provider
+from ..services.scm import github_api_base, gitlab_api_base, token_for
 from .diff import unified_diff_to_patches
 
 logger = logging.getLogger(__name__)
@@ -147,7 +148,7 @@ def execute_code_review(review_id: int) -> None:
 def _fetch_pr_metadata(provider: str, owner: str, name: str, pr_id: str) -> dict[str, Any]:
     settings = get_settings()
     if "gitlab" in provider.lower():
-        token = settings.gitlab_token
+        token = token_for(provider, settings)
         if not token:
             raise RuntimeError("TWEAKER_GITLAB_TOKEN is not configured")
         project = quote(f"{owner}/{name}", safe="")
@@ -167,7 +168,7 @@ def _fetch_pr_metadata(provider: str, owner: str, name: str, pr_id: str) -> dict
             "url": data.get("web_url"),
             "state": data.get("state"),
         }
-    token = settings.github_token
+    token = token_for(provider, settings)
     if not token:
         raise RuntimeError("TWEAKER_GITHUB_TOKEN is not configured")
     response = httpx.get(
@@ -190,7 +191,7 @@ def _fetch_pr_metadata(provider: str, owner: str, name: str, pr_id: str) -> dict
 def _fetch_diff(provider: str, owner: str, name: str, pr_id: str) -> str:
     settings = get_settings()
     if "gitlab" in provider.lower():
-        token = settings.gitlab_token
+        token = token_for(provider, settings)
         if not token:
             raise RuntimeError("TWEAKER_GITLAB_TOKEN is not configured")
         project = quote(f"{owner}/{name}", safe="")
@@ -205,7 +206,7 @@ def _fetch_diff(provider: str, owner: str, name: str, pr_id: str) -> str:
             f"--- {change.get('old_path')}\n+++ {change.get('new_path')}\n{change.get('diff')}"
             for change in changes
         )
-    token = settings.github_token
+    token = token_for(provider, settings)
     if not token:
         raise RuntimeError("TWEAKER_GITHUB_TOKEN is not configured")
     response = httpx.get(
@@ -301,7 +302,7 @@ def _start_check_run(
     settings = get_settings()
     try:
         if "gitlab" in provider.lower():
-            token = settings.gitlab_token
+            token = token_for(provider, settings)
             if not token:
                 return
             project = quote(f"{owner}/{name}", safe="")
@@ -317,7 +318,7 @@ def _start_check_run(
             )
             response.raise_for_status()
             return
-        token = settings.github_token
+        token = token_for(provider, settings)
         if not token:
             return
         response = httpx.post(
@@ -355,7 +356,7 @@ def _complete_check_run(
     owner, name = item.owner, item.name
     try:
         if "gitlab" in provider.lower():
-            token = settings.gitlab_token
+            token = token_for(provider, settings)
             if not token or not item.head_sha:
                 return
             project = quote(f"{owner}/{name}", safe="")
@@ -372,7 +373,7 @@ def _complete_check_run(
             )
             response.raise_for_status()
             return
-        token = settings.github_token
+        token = token_for(provider, settings)
         if not token or not item.check_run_id:
             return
         annotations = [
@@ -420,7 +421,7 @@ def _post_review(
 ) -> str | None:
     settings = get_settings()
     if "gitlab" in provider.lower():
-        token = settings.gitlab_token
+        token = token_for(provider, settings)
         if not token:
             return None
         project = quote(f"{owner}/{name}", safe="")
@@ -453,7 +454,7 @@ def _post_review(
         )
         response.raise_for_status()
         return None
-    token = settings.github_token
+    token = token_for(provider, settings)
     if not token:
         return None
     url = f"{_github_api_base()}/repos/{owner}/{name}/pulls/{pr_id}/reviews"
@@ -524,16 +525,8 @@ def _github_headers(token: str, *, accept: str = "application/vnd.github+json") 
 
 
 def _github_api_base() -> str:
-    settings = get_settings()
-    host = urlparse(settings.github_base_url).hostname or "github.com"
-    return (
-        "https://api.github.com"
-        if host in {"github.com", "www.github.com"}
-        else f"https://{host}/api/v3"
-    )
+    return github_api_base(get_settings().github_base_url)
 
 
 def _gitlab_api_base() -> str:
-    settings = get_settings()
-    host = urlparse(settings.gitlab_base_url).hostname or "gitlab.com"
-    return f"https://{host}/api/v4"
+    return gitlab_api_base(get_settings().gitlab_base_url)

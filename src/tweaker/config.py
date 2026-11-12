@@ -84,12 +84,41 @@ class Settings(BaseSettings):
         default=None,
         validation_alias=AliasChoices("TWEAKER_GITHUB_TOKEN", "GITHUB_TOKEN"),
     )
+    github_enterprise_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TWEAKER_GITHUB_ENTERPRISE_TOKEN", "GITHUB_ENTERPRISE_TOKEN"
+        ),
+    )
     gitlab_token: str | None = Field(
         default=None,
         validation_alias=AliasChoices("TWEAKER_GITLAB_TOKEN", "GITLAB_TOKEN"),
     )
-    github_base_url: str = "https://github.com"
-    gitlab_base_url: str = "https://gitlab.com"
+    gitlab_self_hosted_token: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices(
+            "TWEAKER_GITLAB_SELF_HOSTED_TOKEN", "GITLAB_SELF_HOSTED_TOKEN"
+        ),
+    )
+    github_base_url: str = Field(
+        default="https://github.com",
+        validation_alias=AliasChoices(
+            "TWEAKER_GITHUB_BASE_URL",
+            "GITHUB_BASE_URL",
+            "TWEAKER_GITHUB_ENTERPRISE_URL",
+            "GITHUB_ENTERPRISE_URL",
+        ),
+    )
+    gitlab_base_url: str = Field(
+        default="https://gitlab.com",
+        validation_alias=AliasChoices(
+            "TWEAKER_GITLAB_BASE_URL",
+            "GITLAB_BASE_URL",
+            "TWEAKER_GITLAB_SELF_HOSTED_URL",
+            "GITLAB_SELF_HOSTED_URL",
+            "GITLAB_URL",
+        ),
+    )
     # JSON object mapping "owner/name" to an existing checkout path.
     repo_map: str = "{}"
 
